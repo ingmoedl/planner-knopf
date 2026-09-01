@@ -7,30 +7,29 @@
 const CONFIG = {
   clientId: "92b69fe3-9c55-4262-98d2-4d5642aaeebe",
   tenantId: "1571141a-75a9-43a3-ad47-8d613cfbb3e6",
-  scopes: ["User.Read", "Tasks.ReadWrite", "Mail.ReadWrite"],
+  scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.ReadWrite"],
   graph: "https://graph.microsoft.com/v1.0",
   plannerWeb: "https://planner.cloud.microsoft/webui/plan/",
   folderParent: "@Aufgabe",
   folderDone: "Verarbeitet",
-  planCacheKey: "pk_plans_v2",
-  planCacheTtlMs: 6 * 60 * 60 * 1000,
-  folderCacheKey: "pk_folder_v2",
+  planCacheKey: "pk_plans_v3",
+  peopleCacheKey: "pk_people_v3",
+  cacheTtlMs: 6 * 60 * 60 * 1000,
+  folderCacheKey: "pk_folder_v3",
 };
 
 let pca = null;
-let plans = [];          // [{id, title}]
-let plansReady = null;   // Promise
+let plans = [];            // [{id, title}]
+let people = [];           // [{id, name, mail}]
+let plansReady = null;
 let selectedPlan = null;
-let activeIndex = -1;
-
+let selectedPerson = null; // Zuweisung
 const el = (id) => document.getElementById(id);
 
 /* ---------- Boot ---------- */
 
 Office.onReady(async () => {
   try {
-    // NAA im neuen Outlook/OWA/aktuellen klassischen Outlook; ältere klassische
-    // Clients fallen automatisch auf den normalen MSAL-Popup-Flow zurück.
     const naa = Office.context.requirements.isSetSupported("NestedAppAuth", "1.1");
     const msalConfig = {
       auth: {
@@ -44,34 +43,68 @@ Office.onReady(async () => {
       : await msal.PublicClientApplication.createPublicClientApplication(msalConfig);
 
     wireUi();
-    plansReady = loadPlans();
     fillFromItem();
-
     Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => {
       if (!Office.context.mailbox.item) { clearForm(); return; }
       fillFromItem();
     });
+
+    // Nur STILLE Anmeldung beim Start (Popups brauchen einen Klick).
+    const token = await silentToken(8000);
+    if (token) {
+      afterAuth();
+    } else {
+      el("login").style.display = "block";
+      el("plan").placeholder = "Bitte zuerst anmelden (Knopf oben)";
+    }
   } catch (e) {
     showStatus("Startfehler: " + msg(e), "err");
   }
 });
 
-/* ---------- Auth + Graph ---------- */
+/* ---------- Auth ---------- */
 
-async function getToken() {
-  const req = { scopes: CONFIG.scopes };
+async function silentToken(timeoutMs) {
+  const req = { scopes: CONFIG.scopes, account: pca.getActiveAccount() || pca.getAllAccounts()[0] };
+  const attempt = pca.acquireTokenSilent(req).then((r) => { pca.setActiveAccount(r.account); return r.accessToken; });
+  const timeout = new Promise((res) => setTimeout(() => res(null), timeoutMs || 8000));
   try {
-    return (await pca.acquireTokenSilent(req)).accessToken;
+    return await Promise.race([attempt, timeout]);
   } catch (e) {
-    const r = await pca.acquireTokenPopup(req);
-    return r.accessToken;
+    return null;
   }
 }
 
-function myOid() {
-  const acct = pca.getActiveAccount() || (pca.getAllAccounts()[0] || null);
-  return acct && acct.idTokenClaims ? acct.idTokenClaims.oid : null;
+async function interactiveToken() {
+  const r = await pca.acquireTokenPopup({ scopes: CONFIG.scopes });
+  pca.setActiveAccount(r.account);
+  return r.accessToken;
 }
+
+/* Token für Hintergrund-Aufrufe: still; wenn das scheitert, Login-Knopf zeigen. */
+async function getToken() {
+  const t = await silentToken(15000);
+  if (t) return t;
+  el("login").style.display = "block";
+  throw new Error("Anmeldung erforderlich – bitte oben auf „Bei Microsoft anmelden" klicken.");
+}
+
+function myAccount() {
+  return pca.getActiveAccount() || pca.getAllAccounts()[0] || null;
+}
+
+function afterAuth() {
+  el("login").style.display = "none";
+  plansReady = loadPlans();
+  loadPeople();
+  const acct = myAccount();
+  if (acct && !selectedPerson) {
+    selectedPerson = { id: acct.idTokenClaims && acct.idTokenClaims.oid, name: acct.name || "Ich" };
+    el("assign").value = selectedPerson.name;
+  }
+}
+
+/* ---------- Graph ---------- */
 
 async function graph(path, opts = {}, retry = true) {
   const token = await getToken();
@@ -91,7 +124,7 @@ async function graph(path, opts = {}, retry = true) {
   return res;
 }
 
-/* ---------- Pläne laden (Cache + Hintergrund-Refresh) ---------- */
+/* ---------- Pläne + Kollegen laden (Cache + Hintergrund-Refresh) ---------- */
 
 async function loadPlans() {
   try {
@@ -99,12 +132,16 @@ async function loadPlans() {
     if (cached && Array.isArray(cached.plans) && cached.plans.length) {
       plans = cached.plans;
       el("plan").placeholder = "Projektnummer oder Name tippen …";
-      if (Date.now() - cached.ts < CONFIG.planCacheTtlMs) { refreshPlans(); return; }
+      if (Office.context.mailbox.item) detectProject();
+      if (Date.now() - cached.ts < CONFIG.cacheTtlMs) { refreshPlans().catch(() => {}); return; }
     }
     await refreshPlans();
     el("plan").placeholder = "Projektnummer oder Name tippen …";
   } catch (e) {
-    if (!plans.length) showStatus("Pläne konnten nicht geladen werden: " + msg(e), "err");
+    if (!plans.length) {
+      el("plan").placeholder = "Laden fehlgeschlagen";
+      showStatus("Pläne konnten nicht geladen werden: " + msg(e), "err");
+    }
   }
 }
 
@@ -124,6 +161,24 @@ async function refreshPlans() {
   if (Office.context.mailbox.item) detectProject();
 }
 
+async function loadPeople() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(CONFIG.peopleCacheKey) || "null");
+    if (cached && Array.isArray(cached.people) && cached.people.length) {
+      people = cached.people;
+      if (Date.now() - cached.ts < CONFIG.cacheTtlMs) return;
+    }
+    const res = await graph("/users?$select=id,displayName,mail&$top=999");
+    if (!res.ok) return;
+    const j = await res.json();
+    people = (j.value || [])
+      .filter((u) => u.displayName && u.mail)
+      .map((u) => ({ id: u.id, name: u.displayName, mail: u.mail }))
+      .sort((a, b) => a.name.localeCompare(b.name, "de"));
+    localStorage.setItem(CONFIG.peopleCacheKey, JSON.stringify({ ts: Date.now(), people }));
+  } catch (e) { /* Zuweisung bleibt dann auf "mir" */ }
+}
+
 /* ---------- Mail lesen + Projekt erkennen ---------- */
 
 function fillFromItem() {
@@ -138,7 +193,8 @@ function fillFromItem() {
   el("detected").textContent = "";
   item.body.getAsync(Office.CoercionType.Text, (res) => {
     item._bodyText = res.status === Office.AsyncResultStatus.Succeeded ? (res.value || "").slice(0, 4000) : "";
-    if (plansReady) plansReady.then(() => detectProject());
+    if (plans.length) detectProject();
+    else if (plansReady) plansReady.then(() => detectProject());
   });
 }
 
@@ -148,7 +204,7 @@ function cleanSubject(s) {
 
 function detectProject() {
   const item = Office.context.mailbox.item;
-  if (!item || !plans.length) return;
+  if (!item || !plans.length || selectedPlan) return;
   const text = (item.subject || "") + "\n" + (item._bodyText || "");
   const seen = new Set();
   const withSuffix = [], bare = [];
@@ -163,14 +219,11 @@ function detectProject() {
   const candidates = [...withSuffix, ...bare];
   for (const cand of candidates) {
     const hits = plans.filter((p) => p.title.toUpperCase().startsWith(cand.toUpperCase()));
-    if (hits.length === 1) {
-      choosePlan(hits[0], "erkannt: " + cand);
-      return;
-    }
+    if (hits.length === 1) { choosePlan(hits[0], "erkannt: " + cand); return; }
     if (hits.length > 1) {
       el("plan").value = cand;
       el("detected").innerHTML = "Nummer <b>" + esc(cand) + "</b> gefunden – bitte Plan wählen:";
-      renderPlanList(cand);
+      renderList("plan", cand);
       return;
     }
   }
@@ -188,53 +241,86 @@ function choosePlan(p, note) {
   el("detected").innerHTML = note ? "✓ <b>" + esc(p.title) + "</b> (" + esc(note) + ")" : "";
 }
 
-/* ---------- Plan-Auswahl (durchsuchbare Liste) ---------- */
-
-function wireUi() {
-  const input = el("plan");
-  input.addEventListener("input", () => { selectedPlan = null; renderPlanList(input.value); });
-  input.addEventListener("focus", () => renderPlanList(input.value));
-  input.addEventListener("keydown", (ev) => {
-    const list = el("planlist");
-    const items = [...list.querySelectorAll("div[data-id]")];
-    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
-      ev.preventDefault();
-      if (!items.length) return;
-      activeIndex = ev.key === "ArrowDown" ? Math.min(activeIndex + 1, items.length - 1) : Math.max(activeIndex - 1, 0);
-      items.forEach((d, i) => d.classList.toggle("active", i === activeIndex));
-      items[activeIndex].scrollIntoView({ block: "nearest" });
-    } else if (ev.key === "Enter") {
-      ev.preventDefault();
-      const pick = activeIndex >= 0 && items[activeIndex] ? items[activeIndex] : items[0];
-      if (pick) choosePlan(plans.find((p) => p.id === pick.dataset.id));
-    } else if (ev.key === "Escape") {
-      list.style.display = "none";
-    }
-  });
-  document.addEventListener("click", (ev) => {
-    if (!ev.target.closest(".planbox")) el("planlist").style.display = "none";
-  });
-  el("create").addEventListener("click", createTask);
+function choosePerson(p) {
+  selectedPerson = p;
+  el("assign").value = p.name;
+  el("assignlist").style.display = "none";
 }
 
-function renderPlanList(filter) {
-  const list = el("planlist");
-  activeIndex = -1;
+/* ---------- Durchsuchbare Listen (Plan + Zuweisung) ---------- */
+
+const combos = {
+  plan:   { listId: "planlist",   items: () => plans,  label: (p) => p.title, pick: (p) => choosePlan(p), clear: () => { selectedPlan = null; },   idx: -1 },
+  assign: { listId: "assignlist", items: () => people, label: (p) => p.name,  pick: (p) => choosePerson(p), clear: () => { selectedPerson = null; }, idx: -1 },
+};
+
+function renderList(key, filter) {
+  const c = combos[key];
+  const list = el(c.listId);
+  c.idx = -1;
   const f = (filter || "").trim().toUpperCase();
-  const hits = (f ? plans.filter((p) => p.title.toUpperCase().includes(f)) : plans).slice(0, 60);
+  const all = c.items();
+  const hits = (f ? all.filter((p) => c.label(p).toUpperCase().includes(f)) : all).slice(0, 60);
   list.innerHTML = "";
   if (!hits.length) {
-    list.innerHTML = '<div class="none">Kein Plan gefunden</div>';
+    list.innerHTML = '<div class="none">Nichts gefunden</div>';
   } else {
     hits.forEach((p) => {
       const d = document.createElement("div");
-      d.textContent = p.title;
-      d.dataset.id = p.id;
-      d.addEventListener("mousedown", (ev) => { ev.preventDefault(); choosePlan(p); });
+      d.textContent = c.label(p);
+      d.dataset.key = key;
+      d.addEventListener("mousedown", (ev) => { ev.preventDefault(); c.pick(p); });
+      d._item = p;
       list.appendChild(d);
     });
   }
   list.style.display = "block";
+}
+
+function wireCombo(key) {
+  const c = combos[key];
+  const input = el(key);
+  input.addEventListener("input", () => { c.clear(); renderList(key, input.value); });
+  input.addEventListener("focus", () => renderList(key, ""));
+  input.addEventListener("keydown", (ev) => {
+    const list = el(c.listId);
+    const items = [...list.children].filter((d) => d._item);
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      if (!items.length) return;
+      c.idx = ev.key === "ArrowDown" ? Math.min(c.idx + 1, items.length - 1) : Math.max(c.idx - 1, 0);
+      items.forEach((d, i) => d.classList.toggle("active", i === c.idx));
+      items[c.idx].scrollIntoView({ block: "nearest" });
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      const pick = c.idx >= 0 && items[c.idx] ? items[c.idx] : items[0];
+      if (pick) c.pick(pick._item);
+    } else if (ev.key === "Escape") {
+      list.style.display = "none";
+    }
+  });
+}
+
+function wireUi() {
+  wireCombo("plan");
+  wireCombo("assign");
+  document.addEventListener("click", (ev) => {
+    if (!ev.target.closest(".combobox")) {
+      el("planlist").style.display = "none";
+      el("assignlist").style.display = "none";
+    }
+  });
+  el("create").addEventListener("click", createTask);
+  el("loginBtn").addEventListener("click", async () => {
+    try {
+      showStatus("Anmeldefenster geöffnet …", "");
+      await interactiveToken();
+      showStatus("", "");
+      afterAuth();
+    } catch (e) {
+      showStatus(friendlyAuthError(e), "err");
+    }
+  });
 }
 
 /* ---------- Aufgabe erstellen ---------- */
@@ -247,7 +333,7 @@ async function createTask() {
     const exact = plans.filter((p) => p.title.toUpperCase() === f);
     if (exact.length === 1) selectedPlan = exact[0];
   }
-  if (!selectedPlan) { showStatus("Bitte zuerst einen Plan auswählen.", "err"); el("plan").focus(); return; }
+  if (!selectedPlan) { showStatus("Bitte zuerst einen Plan auswählen (Feld „Projekt / Plan").", "err"); el("plan").focus(); return; }
   const title = el("title").value.trim();
   if (!title) { showStatus("Bitte einen Titel eingeben.", "err"); el("title").focus(); return; }
 
@@ -261,12 +347,16 @@ async function createTask() {
   const planId = selectedPlan.id;
 
   try {
-    // 1) Task anlegen (mir selbst zugewiesen)
+    // Falls noch kein Token da ist: hier ist ein Klick-Kontext, Popup erlaubt.
+    try { await getToken(); } catch (_) { await interactiveToken(); afterAuth(); }
+
+    // 1) Task anlegen
     const body = { planId, title };
     const due = el("due").value;
     if (due) body.dueDateTime = due + "T10:00:00Z";
-    const oid = myOid();
-    if (oid) body.assignments = { [oid]: { "@odata.type": "#microsoft.graph.plannerAssignment", orderHint: " !" } };
+    const acct = myAccount();
+    const assigneeId = (selectedPerson && selectedPerson.id) || (acct && acct.idTokenClaims && acct.idTokenClaims.oid);
+    if (assigneeId) body.assignments = { [assigneeId]: { "@odata.type": "#microsoft.graph.plannerAssignment", orderHint: " !" } };
     const createRes = await graph("/planner/tasks", { method: "POST", body: JSON.stringify(body) });
     if (!createRes.ok) throw new Error("Aufgabe anlegen fehlgeschlagen (Graph " + createRes.status + ")");
     const task = await createRes.json();
@@ -290,7 +380,7 @@ async function createTask() {
       }
     } catch (e) { /* Mail-Teil ist optional – Task existiert bereits */ }
 
-    // 3) Beschreibung + Mail-Link an die Aufgabe hängen (ETag-Pflicht, 1x Retry)
+    // 3) Beschreibung + Mail-Link an die Aufgabe hängen
     const description =
       "Von: " + fromAddr + "\nEmpfangen: " + received + "\nBetreff: " + subject +
       (webLink ? "\nOriginal-Mail: " + webLink : "") +
@@ -331,7 +421,7 @@ async function patchDetails(taskId, description, webLink, tries) {
   }
 }
 
-/* Planner-Referenz-Keys: . : % @ # müssen encodiert sein (% zuerst!) */
+/* Planner-Referenz-Keys: % zuerst, dann . : @ # encodieren */
 function encodeRefKey(url) {
   return url.replace(/%/g, "%25").replace(/\./g, "%2E").replace(/:/g, "%3A").replace(/@/g, "%40").replace(/#/g, "%23");
 }
@@ -370,7 +460,10 @@ function showStatus(html, cls) {
 function friendlyAuthError(e) {
   const m = msg(e);
   if (/consent|AADSTS65001|admin approval|AADSTS90094/i.test(m)) {
-    return "Zustimmung erforderlich: Bitte im Anmeldefenster zustimmen – falls „Administratorgenehmigung erforderlich" erscheint, muss der M365-Admin der App einmalig zustimmen. (" + esc(m) + ")";
+    return "Zustimmung erforderlich: Bitte im Anmeldefenster zustimmen – falls „Administratorgenehmigung erforderlich" erscheint, muss der M365-Admin der App „Planner-Knopf" einmalig zustimmen. (" + esc(m) + ")";
+  }
+  if (/popup_window_error|popup window/i.test(m)) {
+    return "Das Anmeldefenster wurde blockiert. Bitte Popups für dieses Add-in erlauben oder Outlook im Web verwenden.";
   }
   return "Fehler: " + esc(m);
 }
