@@ -5,7 +5,7 @@
 "use strict";
 
 const CONFIG = {
-  clientId: "%%CLIENT_ID%%",
+  clientId: "92b69fe3-9c55-4262-98d2-4d5642aaeebe",
   tenantId: "1571141a-75a9-43a3-ad47-8d613cfbb3e6",
   scopes: ["User.Read", "Tasks.ReadWrite", "Mail.ReadWrite"],
   graph: "https://graph.microsoft.com/v1.0",
