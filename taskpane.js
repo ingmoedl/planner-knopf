@@ -106,8 +106,12 @@ function afterAuth() {
 
 /* ---------- Graph ---------- */
 
-async function graph(path, opts = {}, retry = true) {
+async function graph(path, opts = {}, retry = true, progress = null) {
+  console.log("[PK] graph:", path);
+  if (progress) progress("Token");
   const token = await getToken();
+  console.log("[PK] token ok, fetch:", path);
+  if (progress) progress("Abruf");
   const res = await fetch(CONFIG.graph + path, {
     ...opts,
     headers: {
@@ -138,6 +142,7 @@ async function loadPlans() {
     await refreshPlans();
     el("plan").placeholder = "Projektnummer oder Name tippen …";
   } catch (e) {
+    console.error("[PK] loadPlans:", e);
     if (!plans.length) {
       el("plan").placeholder = "Laden fehlgeschlagen";
       showStatus("Pläne konnten nicht geladen werden: " + msg(e), "err");
@@ -148,8 +153,9 @@ async function loadPlans() {
 async function refreshPlans() {
   let url = "/me/planner/plans";
   const acc = [];
+  el("plan").placeholder = "Pläne werden geladen … (Anmeldung)";
   while (url) {
-    const res = await graph(url);
+    const res = await graph(url, {}, true, (step) => { el("plan").placeholder = "Pläne werden geladen … (" + step + ")"; });
     if (!res.ok) throw new Error("Graph " + res.status + " beim Laden der Pläne");
     const j = await res.json();
     (j.value || []).forEach((p) => acc.push({ id: p.id, title: p.title || "" }));
