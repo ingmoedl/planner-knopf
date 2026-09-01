@@ -86,7 +86,7 @@ async function getToken() {
   const t = await silentToken(15000);
   if (t) return t;
   el("login").style.display = "block";
-  throw new Error("Anmeldung erforderlich – bitte oben auf „Bei Microsoft anmelden" klicken.");
+  throw new Error("Anmeldung erforderlich – bitte oben auf 'Bei Microsoft anmelden' klicken.");
 }
 
 function myAccount() {
@@ -339,7 +339,7 @@ async function createTask() {
     const exact = plans.filter((p) => p.title.toUpperCase() === f);
     if (exact.length === 1) selectedPlan = exact[0];
   }
-  if (!selectedPlan) { showStatus("Bitte zuerst einen Plan auswählen (Feld „Projekt / Plan").", "err"); el("plan").focus(); return; }
+  if (!selectedPlan) { showStatus("Bitte zuerst einen Plan auswählen (Feld 'Projekt / Plan').", "err"); el("plan").focus(); return; }
   const title = el("title").value.trim();
   if (!title) { showStatus("Bitte einen Titel eingeben.", "err"); el("title").focus(); return; }
 
@@ -466,7 +466,7 @@ function showStatus(html, cls) {
 function friendlyAuthError(e) {
   const m = msg(e);
   if (/consent|AADSTS65001|admin approval|AADSTS90094/i.test(m)) {
-    return "Zustimmung erforderlich: Bitte im Anmeldefenster zustimmen – falls „Administratorgenehmigung erforderlich" erscheint, muss der M365-Admin der App „Planner-Knopf" einmalig zustimmen. (" + esc(m) + ")";
+    return "Zustimmung erforderlich: Bitte im Anmeldefenster zustimmen – falls 'Administratorgenehmigung erforderlich' erscheint, muss der M365-Admin der App 'Planner-Knopf' einmalig zustimmen. (" + esc(m) + ")";
   }
   if (/popup_window_error|popup window/i.test(m)) {
     return "Das Anmeldefenster wurde blockiert. Bitte Popups für dieses Add-in erlauben oder Outlook im Web verwenden.";
