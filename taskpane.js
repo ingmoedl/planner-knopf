@@ -25,12 +25,14 @@ let plansReady = null;
 let selectedPlan = null;
 let selectedPerson = null; // Zuweisung
 const el = (id) => document.getElementById(id);
+const mailItem = () => (Office.context && Office.context.mailbox) ? Office.context.mailbox.item : null;
 
 /* ---------- Boot ---------- */
 
 Office.onReady(async () => {
   try {
-    const naa = Office.context.requirements.isSetSupported("NestedAppAuth", "1.1");
+    const inOutlook = !!(Office.context && Office.context.mailbox);
+    const naa = !!(inOutlook && Office.context.requirements && Office.context.requirements.isSetSupported("NestedAppAuth", "1.1"));
     const msalConfig = {
       auth: {
         clientId: CONFIG.clientId,
@@ -43,11 +45,16 @@ Office.onReady(async () => {
       : await msal.PublicClientApplication.createPublicClientApplication(msalConfig);
 
     wireUi();
-    fillFromItem();
-    Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => {
-      if (!Office.context.mailbox.item) { clearForm(); return; }
+    if (inOutlook) {
       fillFromItem();
-    });
+      Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => {
+        if (!mailItem()) { clearForm(); return; }
+        fillFromItem();
+      });
+    } else {
+      el("title").value = "Standalone-Test";
+      el("create").disabled = false;
+    }
 
     // Nur STILLE Anmeldung beim Start (Popups brauchen einen Klick).
     const token = await silentToken(8000);
@@ -136,7 +143,7 @@ async function loadPlans() {
     if (cached && Array.isArray(cached.plans) && cached.plans.length) {
       plans = cached.plans;
       el("plan").placeholder = "Projektnummer oder Name tippen …";
-      if (Office.context.mailbox.item) detectProject();
+      if (mailItem()) detectProject();
       if (Date.now() - cached.ts < CONFIG.cacheTtlMs) { refreshPlans().catch(() => {}); return; }
     }
     await refreshPlans();
@@ -164,7 +171,7 @@ async function refreshPlans() {
   acc.sort((a, b) => b.title.localeCompare(a.title, "de"));
   plans = acc;
   localStorage.setItem(CONFIG.planCacheKey, JSON.stringify({ ts: Date.now(), plans }));
-  if (Office.context.mailbox.item) detectProject();
+  if (mailItem()) detectProject();
 }
 
 async function loadPeople() {
@@ -188,7 +195,7 @@ async function loadPeople() {
 /* ---------- Mail lesen + Projekt erkennen ---------- */
 
 function fillFromItem() {
-  const item = Office.context.mailbox.item;
+  const item = mailItem();
   if (!item) return;
   showStatus("", "");
   el("create").disabled = false;
@@ -209,7 +216,7 @@ function cleanSubject(s) {
 }
 
 function detectProject() {
-  const item = Office.context.mailbox.item;
+  const item = mailItem();
   if (!item || !plans.length || selectedPlan) return;
   const text = (item.subject || "") + "\n" + (item._bodyText || "");
   const seen = new Set();
@@ -332,8 +339,7 @@ function wireUi() {
 /* ---------- Aufgabe erstellen ---------- */
 
 async function createTask() {
-  const item = Office.context.mailbox.item;
-  if (!item) { showStatus("Keine Mail ausgewählt.", "err"); return; }
+  const item = mailItem(); // null im Standalone-Test: Aufgabe ohne Mail-Bezug
   if (!selectedPlan) {
     const f = el("plan").value.trim().toUpperCase();
     const exact = plans.filter((p) => p.title.toUpperCase() === f);
@@ -347,9 +353,9 @@ async function createTask() {
   btn.disabled = true;
   showStatus("Aufgabe wird erstellt …", "");
 
-  const subject = item.subject || "";
-  const fromAddr = item.from ? (item.from.displayName + " <" + item.from.emailAddress + ">") : "";
-  const received = item.dateTimeCreated ? new Date(item.dateTimeCreated).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }) : "";
+  const subject = item ? (item.subject || "") : title;
+  const fromAddr = (item && item.from) ? (item.from.displayName + " <" + item.from.emailAddress + ">") : "";
+  const received = (item && item.dateTimeCreated) ? new Date(item.dateTimeCreated).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }) : "";
   const planId = selectedPlan.id;
 
   try {
@@ -369,7 +375,7 @@ async function createTask() {
 
     // 2) Mail ggf. verschieben; webLink der (ggf. neuen) Mail holen
     let webLink = "";
-    try {
+    if (item) try {
       const restId = Office.context.mailbox.convertToRestId(item.itemId, Office.MailboxEnums.RestVersion.v2_0);
       if (el("move").checked) {
         const folderId = await getDoneFolderId();
