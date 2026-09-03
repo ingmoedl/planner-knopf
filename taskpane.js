@@ -7,15 +7,12 @@
 const CONFIG = {
   clientId: "92b69fe3-9c55-4262-98d2-4d5642aaeebe",
   tenantId: "1571141a-75a9-43a3-ad47-8d613cfbb3e6",
-  scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.ReadWrite"],
+  scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.Read"],
   graph: "https://graph.microsoft.com/v1.0",
   plannerWeb: "https://planner.cloud.microsoft/webui/plan/",
-  folderParent: "@Aufgabe",
-  folderDone: "Verarbeitet",
   planCacheKey: "pk_plans_v3",
   peopleCacheKey: "pk_people_v3",
   cacheTtlMs: 6 * 60 * 60 * 1000,
-  folderCacheKey: "pk_folder_v3",
 };
 
 let pca = null;
@@ -373,24 +370,13 @@ async function createTask() {
     if (!createRes.ok) throw new Error("Aufgabe anlegen fehlgeschlagen (Graph " + createRes.status + ")");
     const task = await createRes.json();
 
-    // 2) Mail ggf. verschieben; webLink der (ggf. neuen) Mail holen
+    // 2) Link zur Original-Mail holen (die Mail bleibt, wo sie ist)
     let webLink = "";
     if (item) try {
       const restId = Office.context.mailbox.convertToRestId(item.itemId, Office.MailboxEnums.RestVersion.v2_0);
-      if (el("move").checked) {
-        const folderId = await getDoneFolderId();
-        if (folderId) {
-          const mv = await graph("/me/messages/" + encodeURIComponent(restId) + "/move", {
-            method: "POST", body: JSON.stringify({ destinationId: folderId }),
-          });
-          if (mv.ok) { const moved = await mv.json(); webLink = moved.webLink || ""; }
-        }
-      }
-      if (!webLink) {
-        const g = await graph("/me/messages/" + encodeURIComponent(restId) + "?$select=webLink");
-        if (g.ok) webLink = (await g.json()).webLink || "";
-      }
-    } catch (e) { /* Mail-Teil ist optional – Task existiert bereits */ }
+      const g = await graph("/me/messages/" + encodeURIComponent(restId) + "?$select=webLink");
+      if (g.ok) webLink = (await g.json()).webLink || "";
+    } catch (e) { /* Link ist optional – Aufgabe existiert bereits */ }
 
     // 3) Beschreibung + Mail-Link an die Aufgabe hängen
     const description =
@@ -436,32 +422,6 @@ async function patchDetails(taskId, description, webLink, tries) {
 /* Planner-Referenz-Keys: % zuerst, dann . : @ # encodieren */
 function encodeRefKey(url) {
   return url.replace(/%/g, "%25").replace(/\./g, "%2E").replace(/:/g, "%3A").replace(/@/g, "%40").replace(/#/g, "%23");
-}
-
-async function getDoneFolderId() {
-  try {
-    const cached = JSON.parse(localStorage.getItem(CONFIG.folderCacheKey) || "null");
-    if (cached && cached.id) return cached.id;
-    // Ordner @Aufgabe/Verarbeitet suchen – und bei Kollegen ohne den Ordner automatisch anlegen
-    const p = await graph("/me/mailFolders?$filter=displayName eq '" + CONFIG.folderParent.replace("'", "''") + "'");
-    if (!p.ok) return null;
-    let parent = (await p.json()).value[0];
-    if (!parent) {
-      const mk = await graph("/me/mailFolders", { method: "POST", body: JSON.stringify({ displayName: CONFIG.folderParent }) });
-      if (!mk.ok) return null;
-      parent = await mk.json();
-    }
-    const c = await graph("/me/mailFolders/" + parent.id + "/childFolders?$filter=displayName eq '" + CONFIG.folderDone + "'");
-    if (!c.ok) return null;
-    let done = (await c.json()).value[0];
-    if (!done) {
-      const mk = await graph("/me/mailFolders/" + parent.id + "/childFolders", { method: "POST", body: JSON.stringify({ displayName: CONFIG.folderDone }) });
-      if (!mk.ok) return null;
-      done = await mk.json();
-    }
-    localStorage.setItem(CONFIG.folderCacheKey, JSON.stringify({ id: done.id }));
-    return done.id;
-  } catch (e) { return null; }
 }
 
 /* ---------- Helfer ---------- */
