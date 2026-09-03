@@ -1,11 +1,13 @@
 /* Aufgabe in Planner – Outlook-Add-in (ing Burghausen GmbH)
  * Erstellt aus der geöffneten Mail direkt eine Planner-Aufgabe via Microsoft Graph.
  * Auth: Nested App Authentication (MSAL.js), keine Server-Komponente.
- * v1.8: alle Pläne über Team-Mitgliedschaften, Bucket-Auswahl, nur interne Personen. */
+ * v1.8: alle Pläne über Team-Mitgliedschaften, Bucket-Auswahl, nur interne Personen.
+ * v1.9: Diagnosezeile (Anzahl Pläne, gefundene Teams), Versionsanzeige. */
 
 "use strict";
 
 const CONFIG = {
+  version: "1.9",
   clientId: "92b69fe3-9c55-4262-98d2-4d5642aaeebe",
   tenantId: "1571141a-75a9-43a3-ad47-8d613cfbb3e6",
   scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.ReadWrite"],
@@ -25,6 +27,8 @@ let pca = null;
 let plans = [];            // [{id, title}]
 let people = [];           // [{id, name, mail}]
 let buckets = [];          // [{id, name, orderHint}] des gewählten Plans
+let myGroups = null;       // [{name}] M365-Gruppen/Teams des Nutzers; null = memberOf fehlgeschlagen
+let groupsError = null;    // Fehlertext, falls memberOf fehlgeschlagen ist
 let plansReady = null;
 let bucketsReady = null;
 let selectedPlan = null;
@@ -53,6 +57,7 @@ Office.onReady(async () => {
     ["pk_plans_v3", "pk_people_v3"].forEach((k) => { try { localStorage.removeItem(k); } catch (_) {} });
 
     wireUi();
+    el("version").textContent = "Planner-Knopf v" + CONFIG.version;
     if (inOutlook) {
       fillFromItem();
       Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => {
@@ -164,6 +169,9 @@ async function loadPlans() {
     const cached = JSON.parse(localStorage.getItem(CONFIG.planCacheKey) || "null");
     if (cached && Array.isArray(cached.plans) && cached.plans.length) {
       plans = cached.plans;
+      myGroups = Array.isArray(cached.groups) ? cached.groups.map((n) => ({ name: n })) : null;
+      groupsError = cached.groupsError || null;
+      renderPlanInfo();
       el("plan").placeholder = "Projektnummer oder Name tippen …";
       if (mailItem()) detectProject();
       if (Date.now() - cached.ts < CONFIG.cacheTtlMs) { refreshPlans().catch(() => {}); return; }
@@ -201,9 +209,13 @@ async function refreshPlans() {
   let groups = [];
   try {
     groups = await loadMyGroups(setPh);
-    console.log("[PK] M365-Gruppen:", groups.length);
+    myGroups = groups;
+    groupsError = null;
+    console.log("[PK] M365-Gruppen:", groups.length, groups.map((g) => g.name).join(" | "));
   } catch (e) {
     console.warn("[PK] memberOf fehlgeschlagen – es bleibt bei /me/planner/plans:", msg(e));
+    myGroups = null;
+    groupsError = msg(e);
     firstError = firstError || e;
   }
 
@@ -235,8 +247,31 @@ async function refreshPlans() {
   acc.sort((a, b) => b.title.localeCompare(a.title, "de"));
   plans = acc;
   console.log("[PK] Pläne gesamt:", plans.length);
-  localStorage.setItem(CONFIG.planCacheKey, JSON.stringify({ ts: Date.now(), plans }));
+  localStorage.setItem(CONFIG.planCacheKey, JSON.stringify({
+    ts: Date.now(), plans,
+    groups: myGroups ? myGroups.map((g) => g.name) : null,
+    groupsError,
+  }));
+  renderPlanInfo();
   if (mailItem()) detectProject();
+}
+
+/* Diagnosezeile unter dem Plan-Feld: wie viele Pläne, aus welchen Teams. */
+function renderPlanInfo() {
+  const info = el("planinfo");
+  if (!plans.length) { info.textContent = ""; info.title = ""; return; }
+  let s = plans.length + " Pläne";
+  if (myGroups && myGroups.length) {
+    const names = myGroups.map((g) => g.name).sort((a, b) => a.localeCompare(b, "de"));
+    const shown = names.slice(0, 8).join(", ") + (names.length > 8 ? " +" + (names.length - 8) + " weitere" : "");
+    s += " aus " + names.length + " Teams: " + shown;
+    info.title = "Deine Teams/Gruppen:\n" + names.join("\n");
+  } else if (myGroups && !myGroups.length) {
+    s += " – keine Team-Mitgliedschaft gefunden (nur direkt geteilte Pläne)";
+  } else if (groupsError) {
+    s += " – Team-Mitgliedschaften nicht lesbar (" + groupsError + ")";
+  }
+  info.textContent = s;
 }
 
 /* Microsoft-365-Gruppen (Teams) des Nutzers. Liefert Graph 400 ohne Header, erneut mit ConsistencyLevel. */
@@ -428,7 +463,9 @@ function renderList(key, filter) {
   const hits = (f ? all.filter((p) => c.label(p).toUpperCase().includes(f)) : all).slice(0, CONFIG.maxListRows);
   list.innerHTML = "";
   if (!hits.length) {
-    list.innerHTML = '<div class="none">Nichts gefunden</div>';
+    list.innerHTML = '<div class="none">' + (key === "plan"
+      ? "Nichts gefunden – sichtbar sind nur Pläne aus Teams, in denen du Mitglied bist."
+      : "Nichts gefunden") + "</div>";
   } else {
     hits.forEach((p) => {
       const d = document.createElement("div");
