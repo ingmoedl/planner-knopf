@@ -1,4 +1,4 @@
-# Übergabe: Planner-Knopf (Outlook-Add-in „Aufgabe in Planner") – Stand 03.09.2026
+# Übergabe: Planner-Knopf (Outlook-Add-in „Aufgabe in Planner") – Stand 03.09.2026 (v1.8 deployed)
 
 Einstieg für einen neuen Claude-Code-Chat. Ergänzt das Projektgedächtnis
 (`C:\Users\moedl\.claude\projects\C--Users-moedl-Desktop-Code-PPR\memory\aufgaben-kachel-konzept.md`),
@@ -14,13 +14,16 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
 
 ## 2. Ist-Zustand (läuft, vom Nutzer bestätigt)
 
-- **Outlook-Add-in v1.7** (Office-Web-Add-in, XML-Manifest, Taskpane): neues Outlook, klassisches Outlook
+- **Outlook-Add-in v1.8** (Office-Web-Add-in, XML-Manifest, Taskpane): neues Outlook, klassisches Outlook
   und Outlook im Web. Button „→ Planner" (Gruppe „ing Burghausen") in der geöffneten Mail.
-- Panel: Projekt/Plan (durchsuchbare Liste, Projektnummer aus Betreff+Text vorausgewählt), Titel
-  (bereinigter Betreff), Zuweisen an (Kollegen-Liste, vorbelegt mit sich selbst), Fällig am, Button
-  „Aufgabe erstellen" → Aufgabe + Beschreibung (Von/Empfangen/Betreff/Mail-Link) + Referenz
-  „Original-E-Mail" + Link „In Planner öffnen". **Die Mail bleibt im Posteingang** (Verschieben wurde
-  auf Nutzerwunsch komplett entfernt).
+  v1.7 ist vom Nutzer bestätigt; **v1.8 (03.09.2026) ist deployed, der Nutzer-Test in Outlook steht noch aus.**
+- Panel: Projekt/Plan (durchsuchbare Liste **aller** Pläne aus allen Teams, in denen der Nutzer Mitglied
+  ist; Projektnummer aus Betreff+Text vorausgewählt) → **Bucket** (Select mit den vorhandenen Buckets des
+  gewählten Plans, vorbelegt mit dem zuletzt genutzten bzw. ersten; ohne Buckets ausgeblendet) → Titel
+  (bereinigter Betreff) → Zuweisen an (**nur interne Personen**, vorbelegt mit sich selbst) → Fällig am →
+  Button „Aufgabe erstellen" → Aufgabe (mit bucketId) + Beschreibung (Von/Empfangen/Betreff/Mail-Link) +
+  Referenz „Original-E-Mail" + Link „In Planner öffnen". **Die Mail bleibt im Posteingang** (Verschieben
+  wurde auf Nutzerwunsch komplett entfernt).
 - Auth: Nested App Authentication (MSAL.js v3.30, self-hosted) mit Login-Knopf „Bei Microsoft anmelden"
   (Popup nur nach Klick), Fallback auf Standard-MSAL außerhalb von NAA; Standalone-Testmodus, wenn
   `Office.context.mailbox` fehlt.
@@ -49,7 +52,7 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
 ## 4. Deployment-Ablauf
 
 1. Dateien in `planner-knopf\` ändern. In `taskpane.html` den Cache-Buster hochzählen
-   (`taskpane.js?v=N` → N+1; aktuell `v=8`), sonst lädt Outlook bis zu 10 Minuten die alte Logik.
+   (`taskpane.js?v=N` → N+1; aktuell `v=9`), sonst lädt Outlook bis zu 10 Minuten die alte Logik.
 2. `git add -A`, `git commit -m "..."`, `git push origin main` (Push läuft über gh-Credentials).
 3. Pages baut 30–90 s; prüfen mit `curl -s https://ingmoedl.github.io/planner-knopf/taskpane.js | grep <Marker>`.
 4. Nutzer: Outlook komplett neu starten (Webview-Cache), Panel neu öffnen.
@@ -90,59 +93,62 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
    lesen, Fachbegriffe erklären. Er will: sofort, simpel, keine Zwischenschritte, keine erneuten
    Zustimmungsdialoge.
 
-## 7. OFFENE AUFGABEN (Nutzerwunsch vom 03.09.2026, noch nicht umgesetzt)
+## 7. Umgesetzt in v1.8 (03.09.2026, Commit „v1.8: alle Plaene …") – Nutzer-Test in Outlook offen
 
-### 7a) „Nicht alle Pläne werden angezeigt – jeder soll in jedem laufenden Projekt Aufgaben anlegen können"
-Ursache: `GET /me/planner/plans` liefert nur Pläne, die Planner dem Nutzer als „geteilt" führt – in der
-Praxis unvollständig (bekannte Lücken: Aggregations-/Propagierungsverzögerung, Owner-ohne-Member).
-Zusätzlich zeigt `renderList` nur die ersten 60 Treffer (`slice(0, 60)`).
+### 7a) Alle Pläne („jeder soll in jedem laufenden Projekt Aufgaben anlegen können")
+Ursache war: `GET /me/planner/plans` liefert nur Pläne, die Planner dem Nutzer als „geteilt" führt (unvollständig),
+und `renderList` zeigte nur 60 Treffer. Umsetzung in `refreshPlans()` **ohne neue Scopes**:
+1. `/me/planner/plans` (alle Seiten) einsammeln.
+2. `loadMyGroups()`: `GET /me/memberOf/microsoft.graph.group?$select=id,displayName,groupTypes&$top=999`
+   (User.Read reicht laut Doku user-list-memberof). Bei 400 automatisch erneut mit `ConsistencyLevel: eventual`
+   + `$count=true`. Nur Gruppen mit `groupTypes` = `Unified` (M365-Gruppen/Teams) werden weiterverwendet.
+3. Je Gruppe `GET /groups/{id}/planner/plans`, gebündelt per `POST /$batch` (20 je Batch); Einzelantworten
+   ≠ 200 (403/404) werden ignoriert; `@odata.nextLink` in Batch-Antworten wird nachgeladen.
+4. Merge nach `id`, Titel absteigend, Cache `pk_plans_v4` (alte Keys `pk_plans_v3`/`pk_people_v3` werden beim
+   Start gelöscht). Listenlimit `CONFIG.maxListRows` = 300. Konsole: `[PK] M365-Gruppen: N`, `[PK] Pläne gesamt: N`.
+5. `createTask()`: Graph 403 → Meldung „Keine Berechtigung für diesen Plan: Du bist nicht Mitglied im Team
+   dieses Projekts …".
 
-Verifizierter Weg **ohne neue Scopes**:
-1. `GET /me/memberOf/microsoft.graph.group?$select=id,displayName&$top=999` – laut Microsoft-Doku
-   (user-list-memberof, geprüft 03.09.2026) reicht dafür **User.Read** (bereits freigegeben). OData-Cast
-   ohne `$filter`/`$search` braucht keinen ConsistencyLevel-Header; liefert Graph trotzdem 400, dann
-   `ConsistencyLevel: eventual` und `$count=true` mitsenden.
-2. Je Gruppe `GET /groups/{id}/planner/plans` (Tasks.Read ist in Tasks.ReadWrite enthalten), parallel per
-   `Promise.all` oder `POST /$batch` (max. 20 Requests pro Batch); 403/404 einzelner Gruppen ignorieren.
-3. Ergebnis mit `/me/planner/plans` (Roster-Pläne) nach `id` zusammenführen, nach Titel absteigend sortieren,
-   cachen (bestehenden Cache-Key `pk_plans_v3` auf `pk_plans_v4` erhöhen).
-4. In `renderList` das 60er-Limit entfernen bzw. auf ~300 erhöhen.
+**Grenze (dem Nutzer erklärt):** Planner erlaubt das Anlegen nur Team-Mitgliedern. „Jeder in jedem Projekt"
+heißt organisatorisch: alle Mitarbeitenden in alle Jahres-Teams 2020–2026 aufnehmen.
 
-**Grenze, die dem Nutzer erklärt werden muss:** Planner erlaubt das Anlegen von Aufgaben nur Mitgliedern
-der jeweiligen Gruppe. „Jeder in jedem Projekt" setzt voraus, dass alle Mitarbeitenden Mitglied aller
-Jahres-Teams sind (organisatorisch: alle in die Teams 2020–2026 aufnehmen). Ohne Mitgliedschaft liefert
-Graph 403 – der Fall sollte im Add-in mit einer klaren Meldung abgefangen werden („Du bist nicht Mitglied
-im Team dieses Projekts – bitte aufnehmen lassen").
+**Falls memberOf im Test 403 liefert** (Doku-Angabe User.Read stimmt für den Tenant nicht): Fallback ist bereits
+eingebaut (Warnung in Konsole, es bleibt bei `/me/planner/plans`). Alternative ohne Scope-Änderung gibt es dann
+nicht – `/me/joinedTeams` bräuchte Team.ReadBasic.All (Admin-Consent-Runde nötig).
 
 ### 7b) Bucket-Auswahl
-Nach Wahl eines Plans: `GET /planner/plans/{planId}/buckets` (Tasks.Read), nach `orderHint` sortieren, als
-`<select>` unter dem Plan-Feld anzeigen, ersten Bucket vorauswählen (optional: zuletzt genutzten Bucket je
-Plan in localStorage merken). `bucketId` in `POST /planner/tasks` mitgeben. Buckets je Plan cachen (6 h).
-Hat der Plan keine Buckets: Auswahl ausblenden, ohne `bucketId` anlegen. UI-Reihenfolge: Projekt/Plan →
-Bucket → Titel → Zuweisen an → Fällig am.
+`choosePlan()` → `loadBuckets(planId)`: `GET /planner/plans/{planId}/buckets`, ordinal nach `orderHint` sortiert,
+Cache `pk_buckets_v1_<planId>` (6 h), `<select id="bucket">` in `#bucketRow` unter dem Plan-Feld. Vorauswahl:
+zuletzt genutzter Bucket je Plan (`pk_lastbucket_<planId>`), sonst der erste. Keine Buckets → Zeile ausgeblendet,
+Aufgabe ohne `bucketId`. `createTask()` wartet auf `bucketsReady`, sendet `bucketId`, merkt sich den Bucket
+und nennt ihn in der Erfolgsmeldung. Plan-Wechsel/Mail-Wechsel → `hideBuckets()`.
 
 ### 7c) „Zuweisen an" nur interne Personen
-Aktuell `GET /users?$select=id,displayName,mail&$top=999` → enthält Gäste sowie Raum-/Funktionspostfächer.
-Ein `userType`-Filter ist mit User.ReadBasic.All nicht zuverlässig möglich (Property nicht in „basic").
-Robuste Heuristik fürs Büro: nur Einträge mit `mail` auf `@ing-burghausen.de` **und** `displayName` im
-Muster „Nachname, Vorname" (Regex `^[^,]+,\s*\S+`) – Personen heißen dort so, Räume/Funktionspostfächer
-(„Silentroom", „Content Conversion") nicht. Domain in CONFIG konfigurierbar machen.
+`loadPeople()` filtert `GET /users?$select=id,displayName,mail&$top=999` (alle Seiten) auf `mail` endet mit
+`@` + `CONFIG.internalDomain` (`ing-burghausen.de`) **und** `displayName` passt zu `CONFIG.personNamePattern`
+(`^[^,]+,\s*\S+` = „Nachname, Vorname"). Cache `pk_people_v4`. Konsole: `[PK] interne Personen: N von M`.
+Fällt eine interne Person raus, ist ihr Anzeigename nicht im Muster → Muster anpassen oder Konto korrigieren.
 
-### 7d) Danach
-- Skill aktualisieren (Bucket-Schritt im Probelauf; Hinweis zur Team-Mitgliedschaft schärfen), neu
-  paketieren, an Nutzer senden (ersetzt per „Save skill").
-- Gedächtnis-Datei fortschreiben.
+### 7d) Erledigt / noch offen
+- ✅ Skill aktualisiert (Probelauf mit Bucket-Schritt, Fehlerbehebung: Mitgliedschaft, 403-Meldung, Bucket fehlt,
+  Kollege fehlt), neu paketiert (`skills\planner-knopf-installation.skill`, Kopie auf dem Desktop), an Nutzer gesendet.
+- ✅ Gedächtnis-Datei fortgeschrieben.
+- ⏳ **Nutzer-Test v1.8 in Outlook** (Outlook komplett neu starten): Planliste vollständig? Bucket-Feld erscheint nach
+  Planwahl? „Zuweisen an" ohne Gäste/Räume? Bei Problemen Konsole nach `[PK]` durchsuchen (Outlook im Web: F12).
 - Optional/Aufräumen: alte Outlook-Ordner löschen (Nutzer), deaktivierten Flow und SharePoint-Liste
   „Projektzuordnung" löschen (Nutzer-Entscheidung), später zentraler Rollout via M365 Admin Center
   (Exchange-Admin) statt Einzel-Sideload.
 
-## 8. Relevante Code-Stellen (taskpane.js v1.7)
+## 8. Relevante Code-Stellen (taskpane.js v1.8)
 
-- `CONFIG` (oben): clientId, tenantId, scopes, Cache-Keys.
-- `Office.onReady` → MSAL-Init, `fillFromItem`, ItemChanged-Handler, stille Anmeldung → `afterAuth()`.
-- `afterAuth()` → `loadPlans()` (→ `refreshPlans()`), `loadPeople()`, Vorbelegung „Zuweisen an".
-- `detectProject()` → Regex `\b(\d{5})(-[A-Za-z0-9]{1,6})?\b`, Match auf `plan.title.startsWith`.
-- `combos` / `renderList()` / `wireCombo()` → generische durchsuchbare Listen (plan, assign); für den
-  Bucket reicht ein einfaches `<select>`.
-- `createTask()` → POST /planner/tasks (planId, title, assignments, dueDateTime) → webLink der Mail →
-  `patchDetails()` (GET details → ETag → PATCH mit If-Match; references-Key via `encodeRefKey`).
+- `CONFIG` (oben): clientId, tenantId, scopes, Cache-Keys, `internalDomain`, `personNamePattern`, `maxListRows`.
+- `Office.onReady` → MSAL-Init, Alt-Cache löschen, `fillFromItem`, ItemChanged-Handler, stille Anmeldung → `afterAuth()`.
+- `afterAuth()` → `loadPlans()` (→ `refreshPlans()` → `graphAll`, `loadMyGroups`, `$batch`), `loadPeople()`,
+  Vorbelegung „Zuweisen an".
+- `graphAll(path)` → folgt `@odata.nextLink`; `graph(path, opts, retry, progress)` → fetch mit Token, 429-Retry.
+- `detectProject()` → Regex `\b(\d{5})(-[A-Za-z0-9]{1,6})?\b`, Match auf `plan.title.startsWith` → `choosePlan()`.
+- `choosePlan()` → `loadBuckets()` / `renderBuckets()` / `hideBuckets()` (Bucket-Select).
+- `combos` / `renderList()` / `wireCombo()` → generische durchsuchbare Listen (plan, assign).
+- `createTask()` → POST /planner/tasks (planId, bucketId, title, assignments, dueDateTime; 403 → Mitgliedschafts-
+  Meldung) → webLink der Mail → `patchDetails()` (GET details → ETag → PATCH mit If-Match; references-Key via
+  `encodeRefKey`).
