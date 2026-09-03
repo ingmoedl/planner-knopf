@@ -1,4 +1,4 @@
-# Übergabe: Planner-Knopf (Outlook-Add-in „Aufgabe in Planner") – Stand 03.09.2026 (v1.8 deployed)
+# Übergabe: Planner-Knopf (Outlook-Add-in „Aufgabe in Planner") – Stand 03.09.2026 (v2.0 deployed)
 
 Einstieg für einen neuen Claude-Code-Chat. Ergänzt das Projektgedächtnis
 (`C:\Users\moedl\.claude\projects\C--Users-moedl-Desktop-Code-PPR\memory\aufgaben-kachel-konzept.md`),
@@ -14,9 +14,10 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
 
 ## 2. Ist-Zustand (läuft, vom Nutzer bestätigt)
 
-- **Outlook-Add-in v1.8** (Office-Web-Add-in, XML-Manifest, Taskpane): neues Outlook, klassisches Outlook
+- **Outlook-Add-in v2.0** (Office-Web-Add-in, XML-Manifest, Taskpane): neues Outlook, klassisches Outlook
   und Outlook im Web. Button „→ Planner" (Gruppe „ing Burghausen") in der geöffneten Mail.
-  v1.7 ist vom Nutzer bestätigt; **v1.8 (03.09.2026) ist deployed, der Nutzer-Test in Outlook steht noch aus.**
+  v1.7 ist vom Nutzer bestätigt; **v2.0 (03.09.2026) ist deployed und im Browser-Test mit dem Nutzerkonto
+  verifiziert (620 Pläne aus 10 Gruppen); Bestätigung aus Outlook steht noch aus.**
 - Panel: Projekt/Plan (durchsuchbare Liste **aller** Pläne aus allen Teams, in denen der Nutzer Mitglied
   ist; Projektnummer aus Betreff+Text vorausgewählt) → **Bucket** (Select mit den vorhandenen Buckets des
   gewählten Plans, vorbelegt mit dem zuletzt genutzten bzw. ersten; ohne Buckets ausgeblendet) → Titel
@@ -52,8 +53,8 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
 ## 4. Deployment-Ablauf
 
 1. Dateien in `planner-knopf\` ändern. In `taskpane.html` den Cache-Buster hochzählen
-   (`taskpane.js?v=N` → N+1; aktuell `v=11`), sonst lädt Outlook bis zu 10 Minuten die alte Logik.
-   Die Versionsnummer steht rechts unten im Panel („Planner-Knopf v1.9", aus `CONFIG.version`) – so lässt
+   (`taskpane.js?v=N` → N+1; aktuell `v=12`), sonst lädt Outlook bis zu 10 Minuten die alte Logik.
+   Die Versionsnummer steht rechts unten im Panel („Planner-Knopf v2.0", aus `CONFIG.version`) – so lässt
    sich sofort prüfen, ob Outlook schon die neue Fassung lädt.
 2. `git add -A`, `git commit -m "..."`, `git push origin main` (Push läuft über gh-Credentials).
 3. Pages baut 30–90 s; prüfen mit `curl -s https://ingmoedl.github.io/planner-knopf/taskpane.js | grep <Marker>`.
@@ -100,28 +101,36 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
    lesen, Fachbegriffe erklären. Er will: sofort, simpel, keine Zwischenschritte, keine erneuten
    Zustimmungsdialoge.
 
-## 7. Umgesetzt in v1.8 (03.09.2026, Commit „v1.8: alle Plaene …") – Nutzer-Test in Outlook offen
+## 7. Umgesetzt in v1.8–v2.0 (03.09.2026) – Bestätigung aus Outlook offen
 
 ### 7a) Alle Pläne („jeder soll in jedem laufenden Projekt Aufgaben anlegen können")
-Ursache war: `GET /me/planner/plans` liefert nur Pläne, die Planner dem Nutzer als „geteilt" führt (unvollständig),
-und `renderList` zeigte nur 60 Treffer. Umsetzung in `refreshPlans()` **ohne neue Scopes**:
+Ursache war: `GET /me/planner/plans` liefert nur Pläne, die Planner dem Nutzer als „geteilt" führt (beim Nutzer
+**11** statt 620!), und `renderList` zeigte nur 60 Treffer. Umsetzung in `refreshPlans()` **ohne neue Scopes**:
 1. `/me/planner/plans` (alle Seiten) einsammeln.
-2. `loadMyGroups()`: `GET /me/memberOf/microsoft.graph.group?$select=id,displayName,groupTypes&$top=999`
-   (User.Read reicht laut Doku user-list-memberof). Bei 400 automatisch erneut mit `ConsistencyLevel: eventual`
-   + `$count=true`. Nur Gruppen mit `groupTypes` = `Unified` (M365-Gruppen/Teams) werden weiterverwendet.
+2. `loadMyGroups()`: `GET /me/memberOf/microsoft.graph.group?$select=id,displayName&$top=999` – funktioniert mit
+   User.Read (Status 200), **liefert aber nur die `id`**: `displayName` = null, `groupTypes` = [] (Gruppen-
+   Eigenschaften brauchen Group.Read.All o. ä.). Bei 400 automatisch erneut mit `ConsistencyLevel: eventual`.
+   **Falle v1.8:** ein Filter auf `groupTypes` enthält `Unified` verwarf deshalb ALLE Gruppen → Panel zeigte weiter
+   nur 11 Pläne („keine Team-Mitgliedschaft gefunden"). Seit v2.0 kein Typ-Filter mehr; alle Gruppen werden abgefragt.
 3. Je Gruppe `GET /groups/{id}/planner/plans`, gebündelt per `POST /$batch` (20 je Batch); Einzelantworten
-   ≠ 200 (403/404) werden ignoriert; `@odata.nextLink` in Batch-Antworten wird nachgeladen.
-4. Merge nach `id`, Titel absteigend, Cache `pk_plans_v4` (alte Keys `pk_plans_v3`/`pk_people_v3` werden beim
-   Start gelöscht). Listenlimit `CONFIG.maxListRows` = 300. Konsole: `[PK] M365-Gruppen: N`, `[PK] Pläne gesamt: N`.
-5. `createTask()`: Graph 403 → Meldung „Keine Berechtigung für diesen Plan: Du bist nicht Mitglied im Team
-   dieses Projekts …".
+   ≠ 200 (403/404) werden ignoriert; `@odata.nextLink` in Batch-Antworten wird nachgeladen. Je Gruppe werden
+   Plananzahl und Jahrgang der Projektnummern gezählt → `groupLabel()` („25xxx" → „2025", ohne Nummern → „Sonstige").
+4. Merge nach `id`, Titel absteigend, Cache `pk_plans_v5` (`{ts, plans, groups:[{id,plans,label}], groupsError}`;
+   alte Keys v3/v4 werden beim Start gelöscht). Listenlimit `CONFIG.maxListRows` = 500.
+   Konsole: `[PK] Gruppen-Mitgliedschaften: N`, `[PK] Teams: 2025 (143), …`, `[PK] Pläne gesamt: N`.
+5. Diagnosezeile `#planinfo` unter dem Plan-Feld: „620 Pläne · Teams: 2020, 2021, …, 2026, Sonstige" (Tooltip mit
+   Plananzahl je Gruppe). Bei memberOf-Fehler: „Team-Mitgliedschaften nicht lesbar (…)".
+6. `createTask()`: Graph 403 → Meldung „Keine Berechtigung für diesen Plan: Du bist nicht Mitglied im Team …".
+
+**Messwerte Nutzerkonto moedl@ (03.09.2026, Browser-Test):** 10 Gruppen; Pläne je Gruppe: 2020→4, 2021→24,
+2022→38, 2023→50, 2024→257 (`eee3c047…`), 2025→143 (`ae2e1925…`), 2026→96 (`382a8fb6…`), „Sonstige" 8
+(Projektaufgaben, Ausbildung), 2 Gruppen ohne Pläne; **gesamt 620**, darunter „26510-03 MAN F9 Schleuse".
+`GET /groups/{id}` (Name) → 403 mit den vorhandenen Scopes; Token-Scopes: Mail.ReadWrite Tasks.ReadWrite
+User.Read User.ReadBasic.All.
 
 **Grenze (dem Nutzer erklärt):** Planner erlaubt das Anlegen nur Team-Mitgliedern. „Jeder in jedem Projekt"
-heißt organisatorisch: alle Mitarbeitenden in alle Jahres-Teams 2020–2026 aufnehmen.
-
-**Falls memberOf im Test 403 liefert** (Doku-Angabe User.Read stimmt für den Tenant nicht): Fallback ist bereits
-eingebaut (Warnung in Konsole, es bleibt bei `/me/planner/plans`). Alternative ohne Scope-Änderung gibt es dann
-nicht – `/me/joinedTeams` bräuchte Team.ReadBasic.All (Admin-Consent-Runde nötig).
+heißt organisatorisch: alle Mitarbeitenden in alle Jahres-Teams 2020–2026 aufnehmen; Projektpläne nur in den
+Jahres-Teams anlegen (keine privaten Roster-Pläne).
 
 ### 7b) Bucket-Auswahl
 `choosePlan()` → `loadBuckets(planId)`: `GET /planner/plans/{planId}/buckets`, ordinal nach `orderHint` sortiert,
@@ -140,23 +149,24 @@ Fällt eine interne Person raus, ist ihr Anzeigename nicht im Muster → Muster 
 - ✅ Skill aktualisiert (Probelauf mit Bucket-Schritt, Fehlerbehebung: Mitgliedschaft, 403-Meldung, Bucket fehlt,
   Kollege fehlt), neu paketiert (`skills\planner-knopf-installation.skill`, Kopie auf dem Desktop), an Nutzer gesendet.
 - ✅ Gedächtnis-Datei fortgeschrieben.
-- ⏳ **Nutzer-Test v1.8 in Outlook**: Nutzer meldete am 03.09. nachmittags, v1.8 sei aktiv, aber Pläne fehlen weiterhin
-  (Beispiel: „26510-03 MAN F9 Schleuse", Kollegen haben Zugriff). Vermutung: Nutzer ist nicht Mitglied der Gruppe,
-  die diesen Plan besitzt (Team „2026" oder ein separates Team/Roster-Plan). **v1.9** (03.09.) ergänzt dafür die
-  Diagnosezeile „N Pläne aus M Teams: …" unter dem Plan-Feld, eine Versionsanzeige rechts unten und den
-  Redirect-Login für den Browser-Test (siehe 5). Nächster Schritt: mit dem Konto des Nutzers prüfen, welche
-  Teams memberOf liefert und wo der Plan liegt; dann organisatorische Lösung (alle Mitarbeitenden in alle
-  Jahres-Teams; Projektpläne nur innerhalb der Jahres-Teams anlegen, keine privaten Roster-Pläne).
+- ✅ Nutzer meldete am 03.09., v1.8 sei aktiv, aber Pläne fehlen weiterhin („26510-03 MAN F9 Schleuse"). Browser-Test
+  mit dem Nutzerkonto (Redirect-Login, siehe 5) zeigte die Ursache: memberOf liefert nur IDs, der groupTypes-Filter
+  verwarf alles → **v2.0** behebt das (siehe 7a). Der Nutzer IST Mitglied in Team 2026; der Plan ist jetzt in der Liste.
+- ⏳ **Bestätigung aus Outlook** (Outlook komplett neu starten, rechts unten muss „Planner-Knopf v2.0" stehen):
+  Diagnosezeile „620 Pläne · Teams: 2020 … 2026, Sonstige"? 26510-03 findbar? Bucket-Feld nach Planwahl?
+  „Zuweisen an" ohne Gäste/Räume?
 - Optional/Aufräumen: alte Outlook-Ordner löschen (Nutzer), deaktivierten Flow und SharePoint-Liste
   „Projektzuordnung" löschen (Nutzer-Entscheidung), später zentraler Rollout via M365 Admin Center
   (Exchange-Admin) statt Einzel-Sideload.
 
-## 8. Relevante Code-Stellen (taskpane.js v1.8)
+## 8. Relevante Code-Stellen (taskpane.js v2.0)
 
-- `CONFIG` (oben): clientId, tenantId, scopes, Cache-Keys, `internalDomain`, `personNamePattern`, `maxListRows`.
-- `Office.onReady` → MSAL-Init, Alt-Cache löschen, `fillFromItem`, ItemChanged-Handler, stille Anmeldung → `afterAuth()`.
-- `afterAuth()` → `loadPlans()` (→ `refreshPlans()` → `graphAll`, `loadMyGroups`, `$batch`), `loadPeople()`,
-  Vorbelegung „Zuweisen an".
+- `CONFIG` (oben): `version`, clientId, tenantId, scopes, Cache-Keys, `internalDomain`, `personNamePattern`, `maxListRows`.
+- `Office.onReady` → MSAL-Init, `standalone`-Flag, `handleRedirectPromise` (nur Browser-Test), Alt-Cache löschen,
+  Versionsanzeige `#version`, `fillFromItem`, ItemChanged-Handler, stille Anmeldung → `afterAuth()`.
+- `interactiveToken()` → in Outlook Popup, im Browser-Test `acquireTokenRedirect`.
+- `afterAuth()` → `loadPlans()` (→ `refreshPlans()` → `graphAll`, `loadMyGroups`, `$batch`, `groupLabel`,
+  `renderPlanInfo`), `loadPeople()`, Vorbelegung „Zuweisen an".
 - `graphAll(path)` → folgt `@odata.nextLink`; `graph(path, opts, retry, progress)` → fetch mit Token, 429-Retry.
 - `detectProject()` → Regex `\b(\d{5})(-[A-Za-z0-9]{1,6})?\b`, Match auf `plan.title.startsWith` → `choosePlan()`.
 - `choosePlan()` → `loadBuckets()` / `renderBuckets()` / `hideBuckets()` (Bucket-Select).
