@@ -52,7 +52,9 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
 ## 4. Deployment-Ablauf
 
 1. Dateien in `planner-knopf\` ändern. In `taskpane.html` den Cache-Buster hochzählen
-   (`taskpane.js?v=N` → N+1; aktuell `v=9`), sonst lädt Outlook bis zu 10 Minuten die alte Logik.
+   (`taskpane.js?v=N` → N+1; aktuell `v=11`), sonst lädt Outlook bis zu 10 Minuten die alte Logik.
+   Die Versionsnummer steht rechts unten im Panel („Planner-Knopf v1.9", aus `CONFIG.version`) – so lässt
+   sich sofort prüfen, ob Outlook schon die neue Fassung lädt.
 2. `git add -A`, `git commit -m "..."`, `git push origin main` (Push läuft über gh-Credentials).
 3. Pages baut 30–90 s; prüfen mit `curl -s https://ingmoedl.github.io/planner-knopf/taskpane.js | grep <Marker>`.
 4. Nutzer: Outlook komplett neu starten (Webview-Cache), Panel neu öffnen.
@@ -65,11 +67,16 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
 
 ## 5. Test-Möglichkeiten
 
-- Echte Funktionsprüfung (Auth, Pläne, Aufgabe) nur in Outlook/OWA des Nutzers – im eingebauten
-  Claude-Browser sind Auth-Popups blockiert („Anmeldefenster wurde blockiert" ist dort normal).
-- Standalone-Aufruf https://ingmoedl.github.io/planner-knopf/taskpane.html?fresh=N im Claude-Browser zeigt,
-  ob das Skript sauber startet (Konsole via read_console_messages; Login-Knopf muss erscheinen).
-- Konsolenausgaben des Add-ins sind mit `[PK]` geprägt.
+- Echte Funktionsprüfung (Auth, Pläne, Aufgabe) in Outlook/OWA des Nutzers.
+- **Browser-Test mit echtem Konto (seit v1.9):** Standalone-Aufruf
+  https://ingmoedl.github.io/planner-knopf/taskpane.html?fresh=N im eingebauten Claude-Browser; Klick auf
+  „Bei Microsoft anmelden" leitet dort die ganze Seite zur Microsoft-Anmeldung weiter (Redirect-Flow, weil
+  Popups im Pane blockiert sind). **Der Nutzer gibt seine Zugangsdaten selbst im Browser-Pane ein** (Claude
+  tippt nie Passwörter). Nach der Rückkehr lädt das Panel Pläne/Personen; dann per javascript_tool Graph-
+  Abfragen mit `await getToken()` möglich (z. B. memberOf, Plan-Suche) und Konsole lesbar.
+- Ohne Anmeldung zeigt der Standalone-Aufruf nur, ob das Skript sauber startet (Login-Knopf muss erscheinen).
+- Konsolenausgaben des Add-ins sind mit `[PK]` geprägt; die Diagnosezeile unter dem Plan-Feld zeigt
+  „N Pläne aus M Teams: …" bzw. den memberOf-Fehler.
 
 ## 6. Harte Regeln und gelernte Fallen
 
@@ -133,8 +140,13 @@ Fällt eine interne Person raus, ist ihr Anzeigename nicht im Muster → Muster 
 - ✅ Skill aktualisiert (Probelauf mit Bucket-Schritt, Fehlerbehebung: Mitgliedschaft, 403-Meldung, Bucket fehlt,
   Kollege fehlt), neu paketiert (`skills\planner-knopf-installation.skill`, Kopie auf dem Desktop), an Nutzer gesendet.
 - ✅ Gedächtnis-Datei fortgeschrieben.
-- ⏳ **Nutzer-Test v1.8 in Outlook** (Outlook komplett neu starten): Planliste vollständig? Bucket-Feld erscheint nach
-  Planwahl? „Zuweisen an" ohne Gäste/Räume? Bei Problemen Konsole nach `[PK]` durchsuchen (Outlook im Web: F12).
+- ⏳ **Nutzer-Test v1.8 in Outlook**: Nutzer meldete am 03.09. nachmittags, v1.8 sei aktiv, aber Pläne fehlen weiterhin
+  (Beispiel: „26510-03 MAN F9 Schleuse", Kollegen haben Zugriff). Vermutung: Nutzer ist nicht Mitglied der Gruppe,
+  die diesen Plan besitzt (Team „2026" oder ein separates Team/Roster-Plan). **v1.9** (03.09.) ergänzt dafür die
+  Diagnosezeile „N Pläne aus M Teams: …" unter dem Plan-Feld, eine Versionsanzeige rechts unten und den
+  Redirect-Login für den Browser-Test (siehe 5). Nächster Schritt: mit dem Konto des Nutzers prüfen, welche
+  Teams memberOf liefert und wo der Plan liegt; dann organisatorische Lösung (alle Mitarbeitenden in alle
+  Jahres-Teams; Projektpläne nur innerhalb der Jahres-Teams anlegen, keine privaten Roster-Pläne).
 - Optional/Aufräumen: alte Outlook-Ordner löschen (Nutzer), deaktivierten Flow und SharePoint-Liste
   „Projektzuordnung" löschen (Nutzer-Entscheidung), später zentraler Rollout via M365 Admin Center
   (Exchange-Admin) statt Einzel-Sideload.

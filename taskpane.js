@@ -2,32 +2,34 @@
  * Erstellt aus der geöffneten Mail direkt eine Planner-Aufgabe via Microsoft Graph.
  * Auth: Nested App Authentication (MSAL.js), keine Server-Komponente.
  * v1.8: alle Pläne über Team-Mitgliedschaften, Bucket-Auswahl, nur interne Personen.
- * v1.9: Diagnosezeile (Anzahl Pläne, gefundene Teams), Versionsanzeige. */
+ * v1.9: Diagnosezeile (Anzahl Pläne, gefundene Teams), Versionsanzeige.
+ * v2.0: memberOf liefert mit User.Read nur Gruppen-IDs (kein Name, kein groupTypes) → kein Typ-Filter mehr,
+ *       alle Gruppen nach Plänen abfragen; Team-Label aus den Projektnummern der Pläne ableiten. */
 
 "use strict";
 
 const CONFIG = {
-  version: "1.9",
+  version: "2.0",
   clientId: "92b69fe3-9c55-4262-98d2-4d5642aaeebe",
   tenantId: "1571141a-75a9-43a3-ad47-8d613cfbb3e6",
   scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.ReadWrite"],
   graph: "https://graph.microsoft.com/v1.0",
   plannerWeb: "https://planner.cloud.microsoft/webui/plan/",
-  planCacheKey: "pk_plans_v4",
+  planCacheKey: "pk_plans_v5",
   peopleCacheKey: "pk_people_v4",
   bucketCachePrefix: "pk_buckets_v1_",
   lastBucketPrefix: "pk_lastbucket_",
   cacheTtlMs: 6 * 60 * 60 * 1000,
   internalDomain: "ing-burghausen.de",  // "Zuweisen an": nur Personen mit dieser Mail-Domain
   personNamePattern: /^[^,]+,\s*\S+/,    // Personen heißen "Nachname, Vorname" – Räume/Funktionspostfächer nicht
-  maxListRows: 300,
+  maxListRows: 500,
 };
 
 let pca = null;
 let plans = [];            // [{id, title}]
 let people = [];           // [{id, name, mail}]
 let buckets = [];          // [{id, name, orderHint}] des gewählten Plans
-let myGroups = null;       // [{name}] M365-Gruppen/Teams des Nutzers; null = memberOf fehlgeschlagen
+let myGroups = null;       // [{id, label, plans}] Gruppen/Teams des Nutzers; null = memberOf fehlgeschlagen
 let groupsError = null;    // Fehlertext, falls memberOf fehlgeschlagen ist
 let plansReady = null;
 let bucketsReady = null;
@@ -64,7 +66,7 @@ Office.onReady(async () => {
     }
 
     // Alte Cache-Stände (v3) aufräumen
-    ["pk_plans_v3", "pk_people_v3"].forEach((k) => { try { localStorage.removeItem(k); } catch (_) {} });
+    ["pk_plans_v3", "pk_plans_v4", "pk_people_v3"].forEach((k) => { try { localStorage.removeItem(k); } catch (_) {} });
 
     wireUi();
     el("version").textContent = "Planner-Knopf v" + CONFIG.version;
@@ -184,7 +186,7 @@ async function loadPlans() {
     const cached = JSON.parse(localStorage.getItem(CONFIG.planCacheKey) || "null");
     if (cached && Array.isArray(cached.plans) && cached.plans.length) {
       plans = cached.plans;
-      myGroups = Array.isArray(cached.groups) ? cached.groups.map((n) => ({ name: n })) : null;
+      myGroups = Array.isArray(cached.groups) ? cached.groups : null;
       groupsError = cached.groupsError || null;
       renderPlanInfo();
       el("plan").placeholder = "Projektnummer oder Name tippen …";
@@ -204,8 +206,9 @@ async function loadPlans() {
 
 /* Vollständige Planliste:
  *  1) /me/planner/plans            – was Planner dem Nutzer direkt zuordnet (oft unvollständig)
- *  2) /me/memberOf (M365-Gruppen)  – alle Teams, in denen der Nutzer Mitglied ist (User.Read reicht)
- *     → je Gruppe /groups/{id}/planner/plans, gebündelt per $batch (max. 20 je Batch)
+ *  2) /me/memberOf (Gruppen)       – alle Gruppen/Teams, in denen der Nutzer Mitglied ist (User.Read reicht,
+ *     liefert dann aber NUR die IDs – Name und Gruppentyp bleiben leer, also kein Typ-Filter möglich)
+ *     → je Gruppe /groups/{id}/planner/plans, gebündelt per $batch (max. 20 je Batch); 403/404 ignorieren
  *  Zusammenführen nach id, Titel absteigend (neueste Projektnummern oben). */
 async function refreshPlans() {
   const setPh = (step) => { el("plan").placeholder = "Pläne werden geladen … (" + step + ")"; };
@@ -222,11 +225,11 @@ async function refreshPlans() {
   }
 
   let groups = [];
+  let groupsOk = false;
   try {
     groups = await loadMyGroups(setPh);
-    myGroups = groups;
-    groupsError = null;
-    console.log("[PK] M365-Gruppen:", groups.length, groups.map((g) => g.name).join(" | "));
+    groupsOk = true;
+    console.log("[PK] Gruppen-Mitgliedschaften:", groups.length);
   } catch (e) {
     console.warn("[PK] memberOf fehlgeschlagen – es bleibt bei /me/planner/plans:", msg(e));
     myGroups = null;
@@ -234,6 +237,13 @@ async function refreshPlans() {
     firstError = firstError || e;
   }
 
+  // Je Gruppe: Pläne holen und mitzählen, welche Projektnummern-Jahrgänge darin liegen (→ Team-Label)
+  const stats = groups.map((g) => ({ id: g.id, name: g.name || "", plans: 0, years: {} }));
+  const note = (st, p) => {
+    st.plans++;
+    const m = /^(\d{2})\d{3}/.exec(p.title || "");
+    if (m) st.years[m[1]] = (st.years[m[1]] || 0) + 1;
+  };
   let done = 0;
   for (let i = 0; i < groups.length; i += 20) {
     const chunk = groups.slice(i, i + 20);
@@ -245,10 +255,12 @@ async function refreshPlans() {
       const j = await res.json();
       for (const r of (j.responses || [])) {
         if (r.status !== 200 || !r.body) continue; // 403/404: Gruppe ohne Planner oder ohne Zugriff → ignorieren
-        (r.body.value || []).forEach(add);
+        const st = stats[i + parseInt(r.id, 10)];
+        let list = r.body.value || [];
         if (r.body["@odata.nextLink"]) {
-          try { (await graphAll(r.body["@odata.nextLink"].replace(CONFIG.graph, ""))).forEach(add); } catch (_) {}
+          try { list = list.concat(await graphAll(r.body["@odata.nextLink"].replace(CONFIG.graph, ""))); } catch (_) {}
         }
+        list.forEach((p) => { add(p); if (st) note(st, p); });
       }
     } catch (e) {
       console.warn("[PK] Batch:", msg(e));
@@ -256,19 +268,29 @@ async function refreshPlans() {
     }
     done += chunk.length;
   }
+  if (groupsOk) {
+    myGroups = stats.map((st) => ({ id: st.id, plans: st.plans, label: groupLabel(st) }));
+    groupsError = null;
+    console.log("[PK] Teams:", myGroups.filter((g) => g.plans).map((g) => g.label + " (" + g.plans + ")").join(", "));
+  }
 
   const acc = [...byId.values()];
   if (!acc.length && firstError) throw firstError;
   acc.sort((a, b) => b.title.localeCompare(a.title, "de"));
   plans = acc;
   console.log("[PK] Pläne gesamt:", plans.length);
-  localStorage.setItem(CONFIG.planCacheKey, JSON.stringify({
-    ts: Date.now(), plans,
-    groups: myGroups ? myGroups.map((g) => g.name) : null,
-    groupsError,
-  }));
+  localStorage.setItem(CONFIG.planCacheKey, JSON.stringify({ ts: Date.now(), plans, groups: myGroups, groupsError }));
   renderPlanInfo();
   if (mailItem()) detectProject();
+}
+
+/* Team-Label: echter Name, falls lesbar; sonst Jahrgang aus den Projektnummern der Pläne ("25xxx" → "2025"). */
+function groupLabel(st) {
+  if (st.name) return st.name;
+  const years = Object.keys(st.years).sort((a, b) => st.years[b] - st.years[a]);
+  if (!years.length) return st.plans ? "Sonstige" : "";
+  const top = years[0];
+  return (st.years[top] >= st.plans * 0.5) ? "20" + top : "gemischt";
 }
 
 /* Diagnosezeile unter dem Plan-Feld: wie viele Pläne, aus welchen Teams. */
@@ -277,10 +299,16 @@ function renderPlanInfo() {
   if (!plans.length) { info.textContent = ""; info.title = ""; return; }
   let s = plans.length + " Pläne";
   if (myGroups && myGroups.length) {
-    const names = myGroups.map((g) => g.name).sort((a, b) => a.localeCompare(b, "de"));
-    const shown = names.slice(0, 8).join(", ") + (names.length > 8 ? " +" + (names.length - 8) + " weitere" : "");
-    s += " aus " + names.length + " Teams: " + shown;
-    info.title = "Deine Teams/Gruppen:\n" + names.join("\n");
+    const withPlans = myGroups.filter((g) => g.plans > 0);
+    const labels = [...new Set(withPlans.map((g) => g.label).filter(Boolean))].sort((a, b) => a.localeCompare(b, "de"));
+    if (withPlans.length) {
+      const shown = labels.slice(0, 8).join(", ") + (labels.length > 8 ? " +" + (labels.length - 8) + " weitere" : "");
+      s += " · Teams: " + shown;
+      info.title = "Gruppen mit Plänen:\n" + withPlans.map((g) => g.label + " – " + g.plans + " Pläne").join("\n") +
+        (myGroups.length > withPlans.length ? "\n+ " + (myGroups.length - withPlans.length) + " Gruppen ohne Pläne" : "");
+    } else {
+      s += " · " + myGroups.length + " Gruppen ohne Planner-Pläne";
+    }
   } else if (myGroups && !myGroups.length) {
     s += " – keine Team-Mitgliedschaft gefunden (nur direkt geteilte Pläne)";
   } else if (groupsError) {
@@ -289,11 +317,11 @@ function renderPlanInfo() {
   info.textContent = s;
 }
 
-/* Microsoft-365-Gruppen (Teams) des Nutzers. Liefert Graph 400 ohne Header, erneut mit ConsistencyLevel. */
+/* Gruppen/Teams des Nutzers. Mit User.Read kommen nur IDs (displayName/groupTypes leer) – das reicht.
+ * Liefert Graph 400 ohne Header, erneut mit ConsistencyLevel. */
 async function loadMyGroups(setPh) {
   if (setPh) setPh("Teams");
-  const base = "/me/memberOf/microsoft.graph.group?$select=id,displayName,groupTypes&$top=999";
-  let url = base;
+  let url = "/me/memberOf/microsoft.graph.group?$select=id,displayName&$top=999";
   let opts = {};
   const out = [];
   while (url) {
@@ -305,10 +333,7 @@ async function loadMyGroups(setPh) {
     }
     if (!res.ok) throw new Error("Graph " + res.status + " beim Lesen der Team-Mitgliedschaften");
     const j = await res.json();
-    (j.value || []).forEach((g) => {
-      // Nur Microsoft-365-Gruppen ("Unified") können Planner-Pläne haben
-      if (!g.groupTypes || g.groupTypes.includes("Unified")) out.push({ id: g.id, name: g.displayName || "" });
-    });
+    (j.value || []).forEach((g) => { if (g.id) out.push({ id: g.id, name: g.displayName || "" }); });
     url = j["@odata.nextLink"] ? j["@odata.nextLink"].replace(CONFIG.graph, "") : null;
   }
   return out;
