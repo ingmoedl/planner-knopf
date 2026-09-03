@@ -442,14 +442,23 @@ async function getDoneFolderId() {
   try {
     const cached = JSON.parse(localStorage.getItem(CONFIG.folderCacheKey) || "null");
     if (cached && cached.id) return cached.id;
+    // Ordner @Aufgabe/Verarbeitet suchen – und bei Kollegen ohne den Ordner automatisch anlegen
     const p = await graph("/me/mailFolders?$filter=displayName eq '" + CONFIG.folderParent.replace("'", "''") + "'");
     if (!p.ok) return null;
-    const parent = (await p.json()).value[0];
-    if (!parent) return null;
+    let parent = (await p.json()).value[0];
+    if (!parent) {
+      const mk = await graph("/me/mailFolders", { method: "POST", body: JSON.stringify({ displayName: CONFIG.folderParent }) });
+      if (!mk.ok) return null;
+      parent = await mk.json();
+    }
     const c = await graph("/me/mailFolders/" + parent.id + "/childFolders?$filter=displayName eq '" + CONFIG.folderDone + "'");
     if (!c.ok) return null;
-    const done = (await c.json()).value[0];
-    if (!done) return null;
+    let done = (await c.json()).value[0];
+    if (!done) {
+      const mk = await graph("/me/mailFolders/" + parent.id + "/childFolders", { method: "POST", body: JSON.stringify({ displayName: CONFIG.folderDone }) });
+      if (!mk.ok) return null;
+      done = await mk.json();
+    }
     localStorage.setItem(CONFIG.folderCacheKey, JSON.stringify({ id: done.id }));
     return done.id;
   } catch (e) { return null; }
