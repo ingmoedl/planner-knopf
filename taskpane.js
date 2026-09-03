@@ -33,6 +33,7 @@ let plansReady = null;
 let bucketsReady = null;
 let selectedPlan = null;
 let selectedPerson = null; // Zuweisung
+let standalone = false;    // true = außerhalb von Outlook (Browser-Test)
 const el = (id) => document.getElementById(id);
 const mailItem = () => (Office.context && Office.context.mailbox) ? Office.context.mailbox.item : null;
 
@@ -52,6 +53,15 @@ Office.onReady(async () => {
     pca = naa
       ? await msal.createNestablePublicClientApplication(msalConfig)
       : await msal.PublicClientApplication.createPublicClientApplication(msalConfig);
+    standalone = !inOutlook;
+
+    // Browser-Test: Rückkehr von der Anmeldeseite (Redirect-Flow) auswerten
+    if (standalone) {
+      try {
+        const rr = await pca.handleRedirectPromise();
+        if (rr && rr.account) pca.setActiveAccount(rr.account);
+      } catch (e) { console.warn("[PK] handleRedirectPromise:", msg(e)); }
+    }
 
     // Alte Cache-Stände (v3) aufräumen
     ["pk_plans_v3", "pk_people_v3"].forEach((k) => { try { localStorage.removeItem(k); } catch (_) {} });
@@ -96,6 +106,11 @@ async function silentToken(timeoutMs) {
 }
 
 async function interactiveToken() {
+  if (standalone) {
+    // Browser-Test: Popups sind dort oft blockiert → ganze Seite zur Anmeldung weiterleiten
+    await pca.acquireTokenRedirect({ scopes: CONFIG.scopes });
+    return new Promise(() => {}); // Seite wird verlassen
+  }
   const r = await pca.acquireTokenPopup({ scopes: CONFIG.scopes });
   pca.setActiveAccount(r.account);
   return r.accessToken;
