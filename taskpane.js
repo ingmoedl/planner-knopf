@@ -7,7 +7,7 @@
 const CONFIG = {
   clientId: "92b69fe3-9c55-4262-98d2-4d5642aaeebe",
   tenantId: "1571141a-75a9-43a3-ad47-8d613cfbb3e6",
-  scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.Read"],
+  scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.ReadWrite"],
   graph: "https://graph.microsoft.com/v1.0",
   plannerWeb: "https://planner.cloud.microsoft/webui/plan/",
   planCacheKey: "pk_plans_v3",
