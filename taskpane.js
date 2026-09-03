@@ -1,6 +1,7 @@
 /* Aufgabe in Planner – Outlook-Add-in (ing Burghausen GmbH)
  * Erstellt aus der geöffneten Mail direkt eine Planner-Aufgabe via Microsoft Graph.
- * Auth: Nested App Authentication (MSAL.js), keine Server-Komponente. */
+ * Auth: Nested App Authentication (MSAL.js), keine Server-Komponente.
+ * v1.8: alle Pläne über Team-Mitgliedschaften, Bucket-Auswahl, nur interne Personen. */
 
 "use strict";
 
@@ -10,15 +11,22 @@ const CONFIG = {
   scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.ReadWrite"],
   graph: "https://graph.microsoft.com/v1.0",
   plannerWeb: "https://planner.cloud.microsoft/webui/plan/",
-  planCacheKey: "pk_plans_v3",
-  peopleCacheKey: "pk_people_v3",
+  planCacheKey: "pk_plans_v4",
+  peopleCacheKey: "pk_people_v4",
+  bucketCachePrefix: "pk_buckets_v1_",
+  lastBucketPrefix: "pk_lastbucket_",
   cacheTtlMs: 6 * 60 * 60 * 1000,
+  internalDomain: "ing-burghausen.de",  // "Zuweisen an": nur Personen mit dieser Mail-Domain
+  personNamePattern: /^[^,]+,\s*\S+/,    // Personen heißen "Nachname, Vorname" – Räume/Funktionspostfächer nicht
+  maxListRows: 300,
 };
 
 let pca = null;
 let plans = [];            // [{id, title}]
 let people = [];           // [{id, name, mail}]
+let buckets = [];          // [{id, name, orderHint}] des gewählten Plans
 let plansReady = null;
+let bucketsReady = null;
 let selectedPlan = null;
 let selectedPerson = null; // Zuweisung
 const el = (id) => document.getElementById(id);
@@ -40,6 +48,9 @@ Office.onReady(async () => {
     pca = naa
       ? await msal.createNestablePublicClientApplication(msalConfig)
       : await msal.PublicClientApplication.createPublicClientApplication(msalConfig);
+
+    // Alte Cache-Stände (v3) aufräumen
+    ["pk_plans_v3", "pk_people_v3"].forEach((k) => { try { localStorage.removeItem(k); } catch (_) {} });
 
     wireUi();
     if (inOutlook) {
@@ -132,6 +143,20 @@ async function graph(path, opts = {}, retry = true, progress = null) {
   return res;
 }
 
+/* Alle Seiten einer Graph-Liste einsammeln (folgt @odata.nextLink). */
+async function graphAll(path, opts = {}, progress = null) {
+  const out = [];
+  let url = path;
+  while (url) {
+    const res = await graph(url, opts, true, progress);
+    if (!res.ok) throw new Error("Graph " + res.status + " bei " + path.split("?")[0]);
+    const j = await res.json();
+    out.push(...(j.value || []));
+    url = j["@odata.nextLink"] ? j["@odata.nextLink"].replace(CONFIG.graph, "") : null;
+  }
+  return out;
+}
+
 /* ---------- Pläne + Kollegen laden (Cache + Hintergrund-Refresh) ---------- */
 
 async function loadPlans() {
@@ -154,21 +179,89 @@ async function loadPlans() {
   }
 }
 
+/* Vollständige Planliste:
+ *  1) /me/planner/plans            – was Planner dem Nutzer direkt zuordnet (oft unvollständig)
+ *  2) /me/memberOf (M365-Gruppen)  – alle Teams, in denen der Nutzer Mitglied ist (User.Read reicht)
+ *     → je Gruppe /groups/{id}/planner/plans, gebündelt per $batch (max. 20 je Batch)
+ *  Zusammenführen nach id, Titel absteigend (neueste Projektnummern oben). */
 async function refreshPlans() {
-  let url = "/me/planner/plans";
-  const acc = [];
-  el("plan").placeholder = "Pläne werden geladen … (Anmeldung)";
-  while (url) {
-    const res = await graph(url, {}, true, (step) => { el("plan").placeholder = "Pläne werden geladen … (" + step + ")"; });
-    if (!res.ok) throw new Error("Graph " + res.status + " beim Laden der Pläne");
-    const j = await res.json();
-    (j.value || []).forEach((p) => acc.push({ id: p.id, title: p.title || "" }));
-    url = j["@odata.nextLink"] ? j["@odata.nextLink"].replace(CONFIG.graph, "") : null;
+  const setPh = (step) => { el("plan").placeholder = "Pläne werden geladen … (" + step + ")"; };
+  setPh("Anmeldung");
+  const byId = new Map();
+  const add = (p) => { if (p && p.id && !byId.has(p.id)) byId.set(p.id, { id: p.id, title: p.title || "" }); };
+  let firstError = null;
+
+  try {
+    (await graphAll("/me/planner/plans", {}, setPh)).forEach(add);
+  } catch (e) {
+    console.warn("[PK] /me/planner/plans:", msg(e));
+    firstError = e;
   }
+
+  let groups = [];
+  try {
+    groups = await loadMyGroups(setPh);
+    console.log("[PK] M365-Gruppen:", groups.length);
+  } catch (e) {
+    console.warn("[PK] memberOf fehlgeschlagen – es bleibt bei /me/planner/plans:", msg(e));
+    firstError = firstError || e;
+  }
+
+  let done = 0;
+  for (let i = 0; i < groups.length; i += 20) {
+    const chunk = groups.slice(i, i + 20);
+    setPh("Teams " + done + "/" + groups.length);
+    const batch = { requests: chunk.map((g, k) => ({ id: String(k), method: "GET", url: "/groups/" + g.id + "/planner/plans" })) };
+    try {
+      const res = await graph("/$batch", { method: "POST", body: JSON.stringify(batch) });
+      if (!res.ok) throw new Error("Graph " + res.status + " beim Batch-Abruf der Team-Pläne");
+      const j = await res.json();
+      for (const r of (j.responses || [])) {
+        if (r.status !== 200 || !r.body) continue; // 403/404: Gruppe ohne Planner oder ohne Zugriff → ignorieren
+        (r.body.value || []).forEach(add);
+        if (r.body["@odata.nextLink"]) {
+          try { (await graphAll(r.body["@odata.nextLink"].replace(CONFIG.graph, ""))).forEach(add); } catch (_) {}
+        }
+      }
+    } catch (e) {
+      console.warn("[PK] Batch:", msg(e));
+      firstError = firstError || e;
+    }
+    done += chunk.length;
+  }
+
+  const acc = [...byId.values()];
+  if (!acc.length && firstError) throw firstError;
   acc.sort((a, b) => b.title.localeCompare(a.title, "de"));
   plans = acc;
+  console.log("[PK] Pläne gesamt:", plans.length);
   localStorage.setItem(CONFIG.planCacheKey, JSON.stringify({ ts: Date.now(), plans }));
   if (mailItem()) detectProject();
+}
+
+/* Microsoft-365-Gruppen (Teams) des Nutzers. Liefert Graph 400 ohne Header, erneut mit ConsistencyLevel. */
+async function loadMyGroups(setPh) {
+  if (setPh) setPh("Teams");
+  const base = "/me/memberOf/microsoft.graph.group?$select=id,displayName,groupTypes&$top=999";
+  let url = base;
+  let opts = {};
+  const out = [];
+  while (url) {
+    let res = await graph(url, opts);
+    if (res.status === 400 && !opts.headers) {
+      opts = { headers: { ConsistencyLevel: "eventual" } };
+      url = url + (url.includes("$count=true") ? "" : "&$count=true");
+      res = await graph(url, opts);
+    }
+    if (!res.ok) throw new Error("Graph " + res.status + " beim Lesen der Team-Mitgliedschaften");
+    const j = await res.json();
+    (j.value || []).forEach((g) => {
+      // Nur Microsoft-365-Gruppen ("Unified") können Planner-Pläne haben
+      if (!g.groupTypes || g.groupTypes.includes("Unified")) out.push({ id: g.id, name: g.displayName || "" });
+    });
+    url = j["@odata.nextLink"] ? j["@odata.nextLink"].replace(CONFIG.graph, "") : null;
+  }
+  return out;
 }
 
 async function loadPeople() {
@@ -178,15 +271,75 @@ async function loadPeople() {
       people = cached.people;
       if (Date.now() - cached.ts < CONFIG.cacheTtlMs) return;
     }
-    const res = await graph("/users?$select=id,displayName,mail&$top=999");
-    if (!res.ok) return;
-    const j = await res.json();
-    people = (j.value || [])
-      .filter((u) => u.displayName && u.mail)
+    const users = await graphAll("/users?$select=id,displayName,mail&$top=999");
+    const dom = "@" + CONFIG.internalDomain.toLowerCase();
+    people = users
+      .filter((u) => u.displayName && u.mail
+        && u.mail.toLowerCase().endsWith(dom)               // nur eigene Domain (keine Gäste)
+        && CONFIG.personNamePattern.test(u.displayName))    // nur "Nachname, Vorname" (keine Räume/Funktionspostfächer)
       .map((u) => ({ id: u.id, name: u.displayName, mail: u.mail }))
       .sort((a, b) => a.name.localeCompare(b.name, "de"));
+    console.log("[PK] interne Personen:", people.length, "von", users.length);
     localStorage.setItem(CONFIG.peopleCacheKey, JSON.stringify({ ts: Date.now(), people }));
   } catch (e) { /* Zuweisung bleibt dann auf "mir" */ }
+}
+
+/* ---------- Buckets des gewählten Plans ---------- */
+
+function hideBuckets() {
+  buckets = [];
+  bucketsReady = null;
+  el("bucketRow").style.display = "none";
+  el("bucket").innerHTML = "";
+}
+
+async function loadBuckets(planId) {
+  const sel = el("bucket");
+  const row = el("bucketRow");
+  const key = CONFIG.bucketCachePrefix + planId;
+  let list = null;
+  try {
+    const cached = JSON.parse(localStorage.getItem(key) || "null");
+    if (cached && Array.isArray(cached.buckets) && Date.now() - cached.ts < CONFIG.cacheTtlMs) list = cached.buckets;
+  } catch (_) {}
+
+  if (!list) {
+    row.style.display = "block";
+    sel.innerHTML = '<option value="">Buckets werden geladen …</option>';
+    sel.disabled = true;
+    try {
+      const res = await graph("/planner/plans/" + planId + "/buckets");
+      if (!res.ok) throw new Error("Graph " + res.status + " beim Laden der Buckets");
+      const j = await res.json();
+      list = (j.value || []).map((b) => ({ id: b.id, name: b.name || "", orderHint: b.orderHint || "" }));
+      // Planner sortiert Buckets nach orderHint (ordinaler Stringvergleich, aufsteigend)
+      list.sort((a, b) => (a.orderHint < b.orderHint ? -1 : a.orderHint > b.orderHint ? 1 : 0));
+      localStorage.setItem(key, JSON.stringify({ ts: Date.now(), buckets: list }));
+    } catch (e) {
+      console.warn("[PK] loadBuckets:", msg(e));
+      list = [];
+    } finally {
+      sel.disabled = false;
+    }
+  }
+  if (!selectedPlan || selectedPlan.id !== planId) return; // inzwischen anderer Plan gewählt
+  renderBuckets(planId, list);
+}
+
+function renderBuckets(planId, list) {
+  buckets = list;
+  const sel = el("bucket");
+  if (!list.length) { hideBuckets(); return; } // Plan ohne Buckets → Aufgabe ohne Bucket anlegen
+  const last = localStorage.getItem(CONFIG.lastBucketPrefix + planId);
+  sel.innerHTML = "";
+  list.forEach((b) => {
+    const o = document.createElement("option");
+    o.value = b.id;
+    o.textContent = b.name;
+    sel.appendChild(o);
+  });
+  sel.value = (last && list.some((b) => b.id === last)) ? last : list[0].id;
+  el("bucketRow").style.display = "block";
 }
 
 /* ---------- Mail lesen + Projekt erkennen ---------- */
@@ -201,6 +354,7 @@ function fillFromItem() {
   selectedPlan = null;
   el("plan").value = "";
   el("detected").textContent = "";
+  hideBuckets();
   item.body.getAsync(Office.CoercionType.Text, (res) => {
     item._bodyText = res.status === Office.AsyncResultStatus.Succeeded ? (res.value || "").slice(0, 4000) : "";
     if (plans.length) detectProject();
@@ -249,6 +403,7 @@ function choosePlan(p, note) {
   el("plan").value = p.title;
   el("planlist").style.display = "none";
   el("detected").innerHTML = note ? "✓ <b>" + esc(p.title) + "</b> (" + esc(note) + ")" : "";
+  bucketsReady = loadBuckets(p.id);
 }
 
 function choosePerson(p) {
@@ -260,7 +415,7 @@ function choosePerson(p) {
 /* ---------- Durchsuchbare Listen (Plan + Zuweisung) ---------- */
 
 const combos = {
-  plan:   { listId: "planlist",   items: () => plans,  label: (p) => p.title, pick: (p) => choosePlan(p), clear: () => { selectedPlan = null; },   idx: -1 },
+  plan:   { listId: "planlist",   items: () => plans,  label: (p) => p.title, pick: (p) => choosePlan(p), clear: () => { selectedPlan = null; hideBuckets(); }, idx: -1 },
   assign: { listId: "assignlist", items: () => people, label: (p) => p.name,  pick: (p) => choosePerson(p), clear: () => { selectedPerson = null; }, idx: -1 },
 };
 
@@ -270,7 +425,7 @@ function renderList(key, filter) {
   c.idx = -1;
   const f = (filter || "").trim().toUpperCase();
   const all = c.items();
-  const hits = (f ? all.filter((p) => c.label(p).toUpperCase().includes(f)) : all).slice(0, 60);
+  const hits = (f ? all.filter((p) => c.label(p).toUpperCase().includes(f)) : all).slice(0, CONFIG.maxListRows);
   list.innerHTML = "";
   if (!hits.length) {
     list.innerHTML = '<div class="none">Nichts gefunden</div>';
@@ -340,7 +495,7 @@ async function createTask() {
   if (!selectedPlan) {
     const f = el("plan").value.trim().toUpperCase();
     const exact = plans.filter((p) => p.title.toUpperCase() === f);
-    if (exact.length === 1) selectedPlan = exact[0];
+    if (exact.length === 1) choosePlan(exact[0]);
   }
   if (!selectedPlan) { showStatus("Bitte zuerst einen Plan auswählen (Feld 'Projekt / Plan').", "err"); el("plan").focus(); return; }
   const title = el("title").value.trim();
@@ -359,16 +514,25 @@ async function createTask() {
     // Falls noch kein Token da ist: hier ist ein Klick-Kontext, Popup erlaubt.
     try { await getToken(); } catch (_) { await interactiveToken(); afterAuth(); }
 
+    // Buckets ggf. noch fertig laden, damit die Vorauswahl mitgeht
+    if (bucketsReady) { try { await bucketsReady; } catch (_) {} }
+    const bucketId = el("bucketRow").style.display !== "none" ? (el("bucket").value || "") : "";
+
     // 1) Task anlegen
     const body = { planId, title };
+    if (bucketId) body.bucketId = bucketId;
     const due = el("due").value;
     if (due) body.dueDateTime = due + "T10:00:00Z";
     const acct = myAccount();
     const assigneeId = (selectedPerson && selectedPerson.id) || (acct && acct.idTokenClaims && acct.idTokenClaims.oid);
     if (assigneeId) body.assignments = { [assigneeId]: { "@odata.type": "#microsoft.graph.plannerAssignment", orderHint: " !" } };
     const createRes = await graph("/planner/tasks", { method: "POST", body: JSON.stringify(body) });
+    if (createRes.status === 403) {
+      throw new Error("Keine Berechtigung für diesen Plan: Du bist nicht Mitglied im Team dieses Projekts. Bitte vom Team-Besitzer ins Team aufnehmen lassen – danach klappt es.");
+    }
     if (!createRes.ok) throw new Error("Aufgabe anlegen fehlgeschlagen (Graph " + createRes.status + ")");
     const task = await createRes.json();
+    if (bucketId) { try { localStorage.setItem(CONFIG.lastBucketPrefix + planId, bucketId); } catch (_) {} }
 
     // 2) Link zur Original-Mail holen (die Mail bleibt, wo sie ist)
     let webLink = "";
@@ -385,8 +549,10 @@ async function createTask() {
       "\n\n— erstellt mit dem Planner-Knopf aus Outlook";
     await patchDetails(task.id, description, webLink, 2);
 
+    const bucketName = bucketId ? (buckets.find((b) => b.id === bucketId) || {}).name : "";
     const link = CONFIG.plannerWeb + planId + "/view/board/task/" + task.id;
-    showStatus('✓ Aufgabe angelegt in „' + esc(selectedPlan.title) + '".<br><a href="' + link + '" target="_blank" rel="noopener">In Planner öffnen</a>', "ok");
+    showStatus('✓ Aufgabe angelegt in „' + esc(selectedPlan.title) + '"' + (bucketName ? " → Bucket „" + esc(bucketName) + '"' : "") +
+      '.<br><a href="' + link + '" target="_blank" rel="noopener">In Planner öffnen</a>', "ok");
   } catch (e) {
     showStatus(friendlyAuthError(e), "err");
   } finally {
@@ -429,6 +595,7 @@ function encodeRefKey(url) {
 function clearForm() {
   el("title").value = ""; el("plan").value = ""; el("due").value = "";
   selectedPlan = null; el("detected").textContent = "Keine Mail ausgewählt.";
+  hideBuckets();
   el("create").disabled = true;
 }
 

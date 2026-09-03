@@ -17,8 +17,10 @@
     body { margin: 0; padding: 14px 16px; font-family: "Segoe UI", system-ui, sans-serif; font-size: 14px; color: var(--ink); background: var(--bg); }
     h1 { font-size: 15px; margin: 0 0 12px; }
     label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 4px; }
-    input[type=text], input[type=date] { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; font: inherit; background: var(--field); color: var(--ink); }
-    input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    input[type=text], input[type=date], select { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; font: inherit; background: var(--field); color: var(--ink); }
+    input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    select:disabled { color: var(--muted); }
+    #bucketRow { display: none; }
     .combobox { position: relative; }
     .droplist { position: absolute; left: 0; right: 0; top: 100%; z-index: 10; max-height: 200px; overflow-y: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 0 0 6px 6px; box-shadow: 0 6px 16px rgba(0,0,0,.15); display: none; }
     .droplist div { padding: 7px 10px; cursor: pointer; }
@@ -44,7 +46,7 @@
 
   <div id="login">
     <button id="loginBtn" class="primary">Bei Microsoft anmelden</button>
-    <div class="hint">Nur beim ersten Mal nötig: Anmelden und den drei Berechtigungen zustimmen — danach startet der Knopf künftig ohne Nachfrage.</div>
+    <div class="hint">Nur beim ersten Mal nötig — danach startet der Knopf künftig ohne Nachfrage.</div>
   </div>
 
   <div id="form">
@@ -54,6 +56,11 @@
       <div id="planlist" class="droplist"></div>
     </div>
     <div id="detected"></div>
+
+    <div id="bucketRow">
+      <label for="bucket">Bucket</label>
+      <select id="bucket"></select>
+    </div>
 
     <label for="title">Titel der Aufgabe</label>
     <input type="text" id="title" autocomplete="off" />
@@ -73,6 +80,6 @@
 
   <div id="status"></div>
 
-  <script src="taskpane.js?v=8"></script>
+  <script src="taskpane.js?v=9"></script>
 </body>
 </html>
