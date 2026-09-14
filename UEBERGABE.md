@@ -1,4 +1,4 @@
-# Übergabe: Planner-Knopf (Outlook-Add-in „Aufgabe in Planner") – Stand 03.09.2026 (v2.0 deployed)
+# Übergabe: Planner-Knopf (Outlook-Add-in „Aufgabe in Planner") – Stand 14.09.2026 (v2.1 deployed)
 
 Einstieg für einen neuen Claude-Code-Chat. Ergänzt das Projektgedächtnis
 (`C:\Users\moedl\.claude\projects\C--Users-moedl-Desktop-Code-PPR\memory\aufgaben-kachel-konzept.md`),
@@ -14,15 +14,17 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
 
 ## 2. Ist-Zustand (läuft, vom Nutzer bestätigt)
 
-- **Outlook-Add-in v2.0** (Office-Web-Add-in, XML-Manifest, Taskpane): neues Outlook, klassisches Outlook
+- **Outlook-Add-in v2.1** (Office-Web-Add-in, XML-Manifest, Taskpane): neues Outlook, klassisches Outlook
   und Outlook im Web. Button „→ Planner" (Gruppe „ing Burghausen") in der geöffneten Mail.
-  v1.7 ist vom Nutzer bestätigt; **v2.0 (03.09.2026) ist deployed und im Browser-Test mit dem Nutzerkonto
-  verifiziert (620 Pläne aus 10 Gruppen); Bestätigung aus Outlook steht noch aus.**
+  v1.7 ist vom Nutzer bestätigt; v2.0 (03.09.2026) im Browser-Test mit dem Nutzerkonto verifiziert (620 Pläne
+  aus 10 Gruppen); **v2.1 (14.09.2026) deployed – Bestätigung aus Outlook für v2.0/v2.1 steht noch aus.**
 - Panel: Projekt/Plan (durchsuchbare Liste **aller** Pläne aus allen Teams, in denen der Nutzer Mitglied
   ist; Projektnummer aus Betreff+Text vorausgewählt) → **Bucket** (Select mit den vorhandenen Buckets des
   gewählten Plans, vorbelegt mit dem zuletzt genutzten bzw. ersten; ohne Buckets ausgeblendet) → Titel
-  (bereinigter Betreff) → Zuweisen an (**nur interne Personen**, vorbelegt mit sich selbst) → Fällig am →
-  Button „Aufgabe erstellen" → Aufgabe (mit bucketId) + Beschreibung (Von/Empfangen/Betreff/Mail-Link) +
+  (bereinigter Betreff) → Zuweisen an (**nur interne Personen**, vorbelegt mit sich selbst) → **Start** und
+  **Ende / fällig am** (nebeneinander, optional; Start > Ende wird abgewiesen) → **Notizen** (Textfeld) →
+  Button „Aufgabe erstellen" → Aufgabe (mit bucketId, startDateTime, dueDateTime) + **Notizen als Beschreibung**
+  (seit v2.1 KEINE Mail-Infos mehr im Text – Nutzerwunsch, weil die Mail als Anlage hängt) +
   Referenz „Original-E-Mail" + Link „In Planner öffnen". **Die Mail bleibt im Posteingang** (Verschieben
   wurde auf Nutzerwunsch komplett entfernt).
 - Auth: Nested App Authentication (MSAL.js v3.30, self-hosted) mit Login-Knopf „Bei Microsoft anmelden"
@@ -53,8 +55,8 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
 ## 4. Deployment-Ablauf
 
 1. Dateien in `planner-knopf\` ändern. In `taskpane.html` den Cache-Buster hochzählen
-   (`taskpane.js?v=N` → N+1; aktuell `v=12`), sonst lädt Outlook bis zu 10 Minuten die alte Logik.
-   Die Versionsnummer steht rechts unten im Panel („Planner-Knopf v2.0", aus `CONFIG.version`) – so lässt
+   (`taskpane.js?v=N` → N+1; aktuell `v=13`), sonst lädt Outlook bis zu 10 Minuten die alte Logik.
+   Die Versionsnummer steht rechts unten im Panel („Planner-Knopf v2.1", aus `CONFIG.version`) – so lässt
    sich sofort prüfen, ob Outlook schon die neue Fassung lädt.
 2. `git add -A`, `git commit -m "..."`, `git push origin main` (Push läuft über gh-Credentials).
 3. Pages baut 30–90 s; prüfen mit `curl -s https://ingmoedl.github.io/planner-knopf/taskpane.js | grep <Marker>`.
@@ -101,7 +103,7 @@ beginnt mit der Projektnummer (Muster `25506-09 WAC LP13 VDI`, `23547-G01 …`, 
    lesen, Fachbegriffe erklären. Er will: sofort, simpel, keine Zwischenschritte, keine erneuten
    Zustimmungsdialoge.
 
-## 7. Umgesetzt in v1.8–v2.0 (03.09.2026) – Bestätigung aus Outlook offen
+## 7. Umgesetzt in v1.8–v2.1 (03./14.09.2026) – Bestätigung aus Outlook offen
 
 ### 7a) Alle Pläne („jeder soll in jedem laufenden Projekt Aufgaben anlegen können")
 Ursache war: `GET /me/planner/plans` liefert nur Pläne, die Planner dem Nutzer als „geteilt" führt (beim Nutzer
@@ -152,14 +154,20 @@ Fällt eine interne Person raus, ist ihr Anzeigename nicht im Muster → Muster 
 - ✅ Nutzer meldete am 03.09., v1.8 sei aktiv, aber Pläne fehlen weiterhin („26510-03 MAN F9 Schleuse"). Browser-Test
   mit dem Nutzerkonto (Redirect-Login, siehe 5) zeigte die Ursache: memberOf liefert nur IDs, der groupTypes-Filter
   verwarf alles → **v2.0** behebt das (siehe 7a). Der Nutzer IST Mitglied in Team 2026; der Plan ist jetzt in der Liste.
-- ⏳ **Bestätigung aus Outlook** (Outlook komplett neu starten, rechts unten muss „Planner-Knopf v2.0" stehen):
+- ✅ **v2.1 (14.09.2026)**, Nutzerwunsch: Start- und Enddatum als Felder (Planner kennt nur `startDateTime` und
+  `dueDateTime`; „Ende / fällig am" = Fälligkeit; Prüfung Start ≤ Ende), Notizfeld `#notes` → `description`.
+  Mail-Infos (Von/Empfangen/Betreff/Link) stehen nicht mehr in der Beschreibung; `patchDetails()` setzt
+  `description` nur bei Notizen, die Referenz „Original-E-Mail" bleibt. Skill (Schritt 5, Referenz) angepasst,
+  neu paketiert, gesendet. Cache-Buster `v=13`.
+- ⏳ **Bestätigung aus Outlook** (Outlook komplett neu starten, rechts unten muss „Planner-Knopf v2.1" stehen):
+  Felder Start/Ende und Notizen sichtbar? Notizen landen in der Aufgabenbeschreibung, Mail nur als Anlage?
   Diagnosezeile „620 Pläne · Teams: 2020 … 2026, Sonstige"? 26510-03 findbar? Bucket-Feld nach Planwahl?
   „Zuweisen an" ohne Gäste/Räume?
 - Optional/Aufräumen: alte Outlook-Ordner löschen (Nutzer), deaktivierten Flow und SharePoint-Liste
   „Projektzuordnung" löschen (Nutzer-Entscheidung), später zentraler Rollout via M365 Admin Center
   (Exchange-Admin) statt Einzel-Sideload.
 
-## 8. Relevante Code-Stellen (taskpane.js v2.0)
+## 8. Relevante Code-Stellen (taskpane.js v2.1)
 
 - `CONFIG` (oben): `version`, clientId, tenantId, scopes, Cache-Keys, `internalDomain`, `personNamePattern`, `maxListRows`.
 - `Office.onReady` → MSAL-Init, `standalone`-Flag, `handleRedirectPromise` (nur Browser-Test), Alt-Cache löschen,
@@ -171,6 +179,7 @@ Fällt eine interne Person raus, ist ihr Anzeigename nicht im Muster → Muster 
 - `detectProject()` → Regex `\b(\d{5})(-[A-Za-z0-9]{1,6})?\b`, Match auf `plan.title.startsWith` → `choosePlan()`.
 - `choosePlan()` → `loadBuckets()` / `renderBuckets()` / `hideBuckets()` (Bucket-Select).
 - `combos` / `renderList()` / `wireCombo()` → generische durchsuchbare Listen (plan, assign).
-- `createTask()` → POST /planner/tasks (planId, bucketId, title, assignments, dueDateTime; 403 → Mitgliedschafts-
-  Meldung) → webLink der Mail → `patchDetails()` (GET details → ETag → PATCH mit If-Match; references-Key via
-  `encodeRefKey`).
+- `createTask()` → liest `#start`, `#due`, `#notes` (Validierung Start ≤ Ende) → POST /planner/tasks (planId, bucketId,
+  title, assignments, startDateTime, dueDateTime; 403 → Mitgliedschafts-Meldung) → webLink der Mail →
+  `patchDetails(taskId, notes, webLink)` (GET details → ETag → PATCH mit If-Match; `description` nur wenn Notizen;
+  references-Key via `encodeRefKey`). `fillFromItem()`/`clearForm()` leeren start/due/notes beim Mail-Wechsel.
