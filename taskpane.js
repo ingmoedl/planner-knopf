@@ -4,12 +4,14 @@
  * v1.8: alle Pläne über Team-Mitgliedschaften, Bucket-Auswahl, nur interne Personen.
  * v1.9: Diagnosezeile (Anzahl Pläne, gefundene Teams), Versionsanzeige.
  * v2.0: memberOf liefert mit User.Read nur Gruppen-IDs (kein Name, kein groupTypes) → kein Typ-Filter mehr,
- *       alle Gruppen nach Plänen abfragen; Team-Label aus den Projektnummern der Pläne ableiten. */
+ *       alle Gruppen nach Plänen abfragen; Team-Label aus den Projektnummern der Pläne ableiten.
+ * v2.1: Start- und Enddatum als Felder; Notizfeld wird zur Beschreibung (keine Mail-Infos mehr im Text,
+ *       die Mail bleibt als Referenz 'Original-E-Mail' an der Aufgabe). */
 
 "use strict";
 
 const CONFIG = {
-  version: "2.0",
+  version: "2.1",
   clientId: "92b69fe3-9c55-4262-98d2-4d5642aaeebe",
   tenantId: "1571141a-75a9-43a3-ad47-8d613cfbb3e6",
   scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.ReadWrite"],
@@ -424,7 +426,7 @@ function fillFromItem() {
   if (!item) return;
   showStatus("", "");
   el("create").disabled = false;
-  el("due").value = "";
+  el("start").value = ""; el("due").value = ""; el("notes").value = "";
   el("title").value = cleanSubject(item.subject || "");
   selectedPlan = null;
   el("plan").value = "";
@@ -577,14 +579,15 @@ async function createTask() {
   if (!selectedPlan) { showStatus("Bitte zuerst einen Plan auswählen (Feld 'Projekt / Plan').", "err"); el("plan").focus(); return; }
   const title = el("title").value.trim();
   if (!title) { showStatus("Bitte einen Titel eingeben.", "err"); el("title").focus(); return; }
+  const start = el("start").value;
+  const due = el("due").value;
+  if (start && due && start > due) { showStatus("Das Startdatum liegt nach dem Enddatum. Bitte Termine prüfen.", "err"); el("start").focus(); return; }
+  const notes = el("notes").value.trim();
 
   const btn = el("create");
   btn.disabled = true;
   showStatus("Aufgabe wird erstellt …", "");
 
-  const subject = item ? (item.subject || "") : title;
-  const fromAddr = (item && item.from) ? (item.from.displayName + " <" + item.from.emailAddress + ">") : "";
-  const received = (item && item.dateTimeCreated) ? new Date(item.dateTimeCreated).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }) : "";
   const planId = selectedPlan.id;
 
   try {
@@ -598,7 +601,7 @@ async function createTask() {
     // 1) Task anlegen
     const body = { planId, title };
     if (bucketId) body.bucketId = bucketId;
-    const due = el("due").value;
+    if (start) body.startDateTime = start + "T10:00:00Z";
     if (due) body.dueDateTime = due + "T10:00:00Z";
     const acct = myAccount();
     const assigneeId = (selectedPerson && selectedPerson.id) || (acct && acct.idTokenClaims && acct.idTokenClaims.oid);
@@ -619,12 +622,8 @@ async function createTask() {
       if (g.ok) webLink = (await g.json()).webLink || "";
     } catch (e) { /* Link ist optional – Aufgabe existiert bereits */ }
 
-    // 3) Beschreibung + Mail-Link an die Aufgabe hängen
-    const description =
-      "Von: " + fromAddr + "\nEmpfangen: " + received + "\nBetreff: " + subject +
-      (webLink ? "\nOriginal-Mail: " + webLink : "") +
-      "\n\n— erstellt mit dem Planner-Knopf aus Outlook";
-    await patchDetails(task.id, description, webLink, 2);
+    // 3) Notizen als Beschreibung + Mail als Referenz 'Original-E-Mail' an die Aufgabe hängen
+    if (notes || webLink) await patchDetails(task.id, notes, webLink, 2);
 
     const bucketName = bucketId ? (buckets.find((b) => b.id === bucketId) || {}).name : "";
     const link = CONFIG.plannerWeb + planId + "/view/board/task/" + task.id;
@@ -642,7 +641,8 @@ async function patchDetails(taskId, description, webLink, tries) {
     const det = await graph("/planner/tasks/" + taskId + "/details");
     if (!det.ok) return;
     const etag = (await det.json())["@odata.etag"];
-    const patch = { description };
+    const patch = {};
+    if (description) patch.description = description;
     if (webLink) {
       patch.references = {
         [encodeRefKey(webLink)]: {
@@ -670,7 +670,7 @@ function encodeRefKey(url) {
 /* ---------- Helfer ---------- */
 
 function clearForm() {
-  el("title").value = ""; el("plan").value = ""; el("due").value = "";
+  el("title").value = ""; el("plan").value = ""; el("start").value = ""; el("due").value = ""; el("notes").value = "";
   selectedPlan = null; el("detected").textContent = "Keine Mail ausgewählt.";
   hideBuckets();
   el("create").disabled = true;
