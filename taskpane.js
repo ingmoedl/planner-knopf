@@ -6,12 +6,14 @@
  * v2.0: memberOf liefert mit User.Read nur Gruppen-IDs (kein Name, kein groupTypes) → kein Typ-Filter mehr,
  *       alle Gruppen nach Plänen abfragen; Team-Label aus den Projektnummern der Pläne ableiten.
  * v2.1: Start- und Enddatum als Felder; Notizfeld wird zur Beschreibung (keine Mail-Infos mehr im Text,
- *       die Mail bleibt als Referenz 'Original-E-Mail' an der Aufgabe). */
+ *       die Mail bleibt als Referenz 'Original-E-Mail' an der Aufgabe).
+ * v2.2: drei Termine – Startdatum (startDateTime), Enddatum (erste Zeile der Beschreibung, Planner hat dafür
+ *       kein Feld) und Fälligkeitsdatum (dueDateTime). */
 
 "use strict";
 
 const CONFIG = {
-  version: "2.1",
+  version: "2.2",
   clientId: "92b69fe3-9c55-4262-98d2-4d5642aaeebe",
   tenantId: "1571141a-75a9-43a3-ad47-8d613cfbb3e6",
   scopes: ["User.Read", "User.ReadBasic.All", "Tasks.ReadWrite", "Mail.ReadWrite"],
@@ -426,7 +428,7 @@ function fillFromItem() {
   if (!item) return;
   showStatus("", "");
   el("create").disabled = false;
-  el("start").value = ""; el("due").value = ""; el("notes").value = "";
+  el("start").value = ""; el("end").value = ""; el("due").value = ""; el("notes").value = "";
   el("title").value = cleanSubject(item.subject || "");
   selectedPlan = null;
   el("plan").value = "";
@@ -580,9 +582,13 @@ async function createTask() {
   const title = el("title").value.trim();
   if (!title) { showStatus("Bitte einen Titel eingeben.", "err"); el("title").focus(); return; }
   const start = el("start").value;
+  const end = el("end").value;
   const due = el("due").value;
-  if (start && due && start > due) { showStatus("Das Startdatum liegt nach dem Enddatum. Bitte Termine prüfen.", "err"); el("start").focus(); return; }
+  if (start && end && start > end) { showStatus("Das Startdatum liegt nach dem Enddatum. Bitte Termine prüfen.", "err"); el("start").focus(); return; }
+  if (start && due && start > due) { showStatus("Das Startdatum liegt nach dem Fälligkeitsdatum. Bitte Termine prüfen.", "err"); el("start").focus(); return; }
   const notes = el("notes").value.trim();
+  // Planner kennt nur Start und Fällig am – das Enddatum wird als erste Zeile der Beschreibung festgehalten.
+  const description = (end ? "Enddatum: " + fmtDate(end) + (notes ? "\n\n" : "") : "") + notes;
 
   const btn = el("create");
   btn.disabled = true;
@@ -622,8 +628,8 @@ async function createTask() {
       if (g.ok) webLink = (await g.json()).webLink || "";
     } catch (e) { /* Link ist optional – Aufgabe existiert bereits */ }
 
-    // 3) Notizen als Beschreibung + Mail als Referenz 'Original-E-Mail' an die Aufgabe hängen
-    if (notes || webLink) await patchDetails(task.id, notes, webLink, 2);
+    // 3) Enddatum + Notizen als Beschreibung, Mail als Referenz 'Original-E-Mail' an die Aufgabe hängen
+    if (description || webLink) await patchDetails(task.id, description, webLink, 2);
 
     const bucketName = bucketId ? (buckets.find((b) => b.id === bucketId) || {}).name : "";
     const link = CONFIG.plannerWeb + planId + "/view/board/task/" + task.id;
@@ -669,8 +675,14 @@ function encodeRefKey(url) {
 
 /* ---------- Helfer ---------- */
 
+/* "2026-09-30" → "30.09.2026" */
+function fmtDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  return m ? m[3] + "." + m[2] + "." + m[1] : iso;
+}
+
 function clearForm() {
-  el("title").value = ""; el("plan").value = ""; el("start").value = ""; el("due").value = ""; el("notes").value = "";
+  el("title").value = ""; el("plan").value = ""; el("start").value = ""; el("end").value = ""; el("due").value = ""; el("notes").value = "";
   selectedPlan = null; el("detected").textContent = "Keine Mail ausgewählt.";
   hideBuckets();
   el("create").disabled = true;

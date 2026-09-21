@@ -20,8 +20,9 @@
     input[type=text], input[type=date], select, textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; font: inherit; background: var(--field); color: var(--ink); }
     input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
     textarea { resize: vertical; min-height: 66px; line-height: 1.4; }
-    .row2 { display: flex; gap: 10px; }
-    .row2 > div { flex: 1; min-width: 0; }
+    .dates { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px; }
+    .dates > div { min-width: 0; }
+    .dates input[type=date] { padding: 7px 6px; font-size: 13px; }
     select:disabled { color: var(--muted); }
     #bucketRow { display: none; }
     .combobox { position: relative; }
@@ -75,16 +76,21 @@
       <div id="assignlist" class="droplist"></div>
     </div>
 
-    <div class="row2">
+    <div class="dates">
       <div>
-        <label for="start">Start (optional)</label>
+        <label for="start">Startdatum</label>
         <input type="date" id="start" />
       </div>
       <div>
-        <label for="due">Ende / fällig am (optional)</label>
+        <label for="end">Enddatum</label>
+        <input type="date" id="end" />
+      </div>
+      <div>
+        <label for="due">Fälligkeitsdatum</label>
         <input type="date" id="due" />
       </div>
     </div>
+    <div class="hint">Alle Termine optional. Planner speichert Start- und Fälligkeitsdatum als Termine; das Enddatum steht als erste Zeile in der Beschreibung.</div>
 
     <label for="notes">Notizen (optional)</label>
     <textarea id="notes" rows="3" placeholder="Was ist zu tun? Diese Notizen werden zur Aufgabenbeschreibung. Die E-Mail selbst hängt als Anlage an der Aufgabe."></textarea>
@@ -95,6 +101,6 @@
   <div id="status"></div>
   <div id="version" class="hint" style="margin-top: 18px; text-align: right;"></div>
 
-  <script src="taskpane.js?v=13"></script>
+  <script src="taskpane.js?v=14"></script>
 </body>
 </html>
